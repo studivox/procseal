@@ -106,3 +106,101 @@ cases.
   findings. Live PM2 inspection is deferred to a following milestone.
 - Documentation was updated to use `npx procseal audit` instead of the
   earlier planned `scan` subcommand name.
+
+## [Unreleased] — PM2 adapter milestone
+
+### Added
+
+- A read-only PM2 process adapter (`src/adapters/pm2.ts`) that invokes
+  exactly one fixed command, equivalent to `pm2 jlist`, through
+  `node:child_process.execFile` with `shell: false`, a fixed argument
+  array, a command timeout, and a strict stdout/stderr buffer limit
+  (`core/command-runner.ts`). Never `exec`, never a shell command string,
+  never `sudo`; never restarts, reloads, stops, deletes, saves, kills, or
+  updates a PM2 process. Inspects only the PM2 daemon the current OS user's
+  own environment resolves to. Supports dependency injection of the
+  command runner, so its tests never require a real PM2 daemon.
+- An opaque `ObservedValue` type (`core/observed-value.ts`) representing
+  every PM2 environment value. The raw string lives only in a true
+  JavaScript private field — never returned by a getter, `toString`,
+  `valueOf`, `toJSON`, or any inspector — and the only operations exposed
+  are `equals()`, `equalsPlain()`, and `displayFingerprint()`, all
+  delegating to the existing HMAC-based `Fingerprinter`
+  (`core/fingerprint.ts`). Construction registers the raw value in the
+  run's `SecretRegistry` immediately, so it is scrubbable from output even
+  if no other method on it is ever called.
+- Immediately after successful JSON parsing, the adapter recursively
+  registers every string leaf of the raw `pm2 jlist` payload in the run's
+  `SecretRegistry`, before any normalization or reporting — treating the
+  entire payload as sensitive, not only the fields the normalized snapshot
+  happens to expose.
+- A normalized `Pm2Snapshot` (`core/pm2-types.ts`) exposing only a safe
+  process identifier, a redacted/validated process name, PM2's numeric id
+  (when valid), a validated status enum, environment variable names, and
+  opaque `ObservedValue`s — never the raw `pm2_env`, full command lines,
+  raw node arguments, raw paths, or raw stdout/stderr.
+- Documented, fail-fast hard limits (`PM2_LIMITS` in `src/adapters/pm2.ts`)
+  for process count, environment variables per process, key length, value
+  length, and JSON payload size, plus a command timeout. Exceeding any of
+  them fails the whole run with a stable, non-sensitive error code instead
+  of silently truncating a value and comparing the truncated version — a
+  truncated secret compared as if it were the whole value could produce a
+  false equality result.
+- Stable, non-sensitive adapter error codes for: PM2 binary not found, PM2
+  daemon unavailable, timeout, output too large, invalid JSON, malformed
+  top-level payload, and each hard-limit violation. None of them ever
+  carries raw stdout, stderr, or an underlying error's message — see
+  `core/command-runner.ts`'s `CommandOutcome`, which classifies failures
+  from Node's structured error fields and never hands the adapter raw
+  process output at all.
+- A real, isolated end-to-end test (`tests/e2e/pm2-live.test.ts`) that
+  starts an actual PM2 daemon under a unique temporary `PM2_HOME` (created
+  with `mkdtemp`), starts a tiny synthetic Node process with a synthetic
+  sentinel environment value, reads it back through the adapter, and
+  proves the sentinel never appears in any output or serialization. Torn
+  down through a dedicated guard (`tests/e2e/pm2-isolation-guard.ts`) that
+  refuses to run any cleanup command — including `pm2 kill` — unless
+  `PM2_HOME` is present, non-empty, not the user's real `PM2_HOME`, and
+  located inside the test's own temporary directory; the guard's refusal
+  behavior has its own unit tests proving the kill command is never
+  invoked when a check fails.
+- `pm2` added as a pinned, exact-version `devDependency` (`7.0.3`) used
+  only by the isolated end-to-end test. It is not a runtime dependency of
+  the published package: `npm pack --dry-run` confirms the tarball
+  contains no `pm2`, no tests, no fixtures, no temp files, no source maps,
+  and no `node_modules`. `pm2` itself adds no `pre`/`post`/`install`
+  lifecycle scripts to the dependency tree.
+- GitHub Actions CI now runs unit tests, adapter integration tests, and
+  the isolated real-PM2 end-to-end test as separate steps (Node.js 20 and
+  22), in addition to the existing install, format, lint, typecheck,
+  build, and package dry-run steps.
+
+### Security
+
+- Adversarial tests prove `ObservedValue`'s raw value cannot be recovered
+  through `JSON.stringify` (direct or nested), `String()`/template-literal
+  coercion, implicit `ToString` coercion, `util.inspect` (including with
+  `showHidden`), `console.log`, `Object.keys`/`getOwnPropertyNames`/
+  `entries`/`Reflect.ownKeys`, `Object.getOwnPropertySymbols`,
+  `Object.getOwnPropertyDescriptors`, or a thrown `Error`'s message.
+- Unit tests with an injected command-runner fixture cover: a valid
+  payload, zero processes, multiple processes, a missing process name, an
+  invalid PM2 id, an invalid status, duplicate environment keys in the raw
+  JSON text, a missing environment object, invalid JSON, a timeout, a
+  missing binary, an unavailable daemon, oversized stdout (both at the
+  runner level and via the adapter's own independent payload-size check),
+  an excessive process count, an excessive environment-variable count,
+  excessive key/value lengths, hostile process names containing newlines
+  and ANSI escapes, and a raw secret present in stdout that never appears
+  in the returned diagnostic.
+- `procseal audit` is unchanged by this milestone: the PM2 adapter is not
+  wired into the public CLI yet, so `audit` still always reports
+  `not_implemented` and performs no machine inspection. No production data
+  is uploaded anywhere — this remains true with the adapter in place,
+  since it only ever reads a local PM2 daemon and returns data in-process.
+
+### Notes
+
+- PS001–PS008 detection logic (comparing declared configuration against
+  the live PM2 snapshot) remains fully deferred to the next milestone. This
+  milestone is the adapter and its safety proof only.

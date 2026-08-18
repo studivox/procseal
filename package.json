@@ -41,12 +41,16 @@
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:fix": "prettier --write .",
-    "test": "tsx --test $(find tests -name '*.test.ts')"
+    "test:unit": "tsx --test $(find tests/unit -name '*.test.ts')",
+    "test:integration": "tsx --test $(find tests/integration -name '*.test.ts')",
+    "test:e2e": "tsx --test $(find tests/e2e -name '*.test.ts')",
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.2.0",
     "eslint": "^10.8.1",
+    "pm2": "7.0.3",
     "prettier": "^3.9.6",
     "tsx": "^4.23.12",
     "typescript": "^6.0.3",

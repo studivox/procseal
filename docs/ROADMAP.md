@@ -6,7 +6,7 @@ This roadmap records intent, not release promises. Scope may change as the threa
 
 - [x] Document the threat model and redaction contract
 - [x] Parse `.env` files without mutating the process environment
-- [ ] Read PM2 process metadata through a replaceable adapter
+- [x] Read PM2 process metadata through a replaceable adapter
 - [ ] Compare declared configuration with live process state
 - [ ] Emit stable findings with severity and remediation text
 - [x] Add terminal and JSON reporters
@@ -15,8 +15,13 @@ This roadmap records intent, not release promises. Scope may change as the threa
 
 The CLI foundation (executable `procseal` command, shared types, HMAC
 fingerprinting, redaction, dotenv parsing, reporters) landed first as its
-own milestone. `procseal audit` reports an explicit `not_implemented`
-status until the PM2 adapter above ships.
+own milestone. The read-only PM2 adapter (`src/adapters/pm2.ts`) landed
+second, with its own unit, integration, and isolated real-PM2
+end-to-end test suite (see [docs/THREAT_MODEL.md](THREAT_MODEL.md)) — but
+it is not wired into the public CLI yet. `procseal audit` still reports an
+explicit `not_implemented` status and performs no machine inspection until
+PS001–PS008 detection (the next milestone) actually calls the adapter and
+compares its snapshot against declared configuration.
 
 Planned initial rules:
 
