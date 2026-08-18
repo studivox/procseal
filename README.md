@@ -12,37 +12,43 @@ ProcSeal is a read-only CLI that will compare declared configuration with runtim
 
 ## Try it now
 
-```bash
-npx procseal --help
-npx procseal audit
-npx procseal audit --json
-```
-
-`procseal` is not published to npm yet. To run it from a local clone:
+`procseal` is **not published to npm** (the package is private and
+pre-release), so `npx procseal` does not work yet. Run it from a local
+clone instead:
 
 ```bash
 git clone https://github.com/studivox/procseal.git
 cd procseal
 npm ci
 npm run build
+node dist/cli.js --help
 node dist/cli.js audit
+node dist/cli.js audit --json
+```
+
+Once a first version is published, the intended entry point will be:
+
+```bash
+# Future, once published — does not work yet.
+npx procseal audit
 ```
 
 ### Exit codes
 
-| Code | Meaning                                                                         |
-| ---- | ------------------------------------------------------------------------------- |
-| `0`  | The command completed. For `audit`, inspect the reported `status` field.        |
-| `1`  | Internal error. The message is sanitized to avoid leaking configuration values. |
-| `2`  | Usage error — unknown command or invalid option.                                |
+| Code | Meaning                                                                                                                            |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | The command completed. For `audit`, inspect the reported `status` field.                                                           |
+| `1`  | Internal error. A static message and a non-sensitive error code are printed; the original error message and stack are never shown. |
+| `2`  | Usage error — unknown command or invalid option.                                                                                   |
 
 ## Implemented in this milestone
 
 - An executable `procseal` CLI: `--help`, `--version`, `audit`, `audit --help`, `audit --json`.
 - Shared core types for findings, severities, and the eight stable rule identifiers (PS001–PS008).
-- Keyed HMAC-SHA-256 fingerprinting with a random, run-scoped, in-memory-only comparison key — see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
-- A dotenv-style parser that never mutates `process.env`.
-- Terminal and JSON reporters that only ever emit structured, redacted findings.
+- Keyed HMAC-SHA-256 fingerprinting with a random, run-scoped, in-memory-only comparison key, with equality (`equals`) and display (`displayFingerprint`) kept as separate operations — see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- A dotenv-style parser that never mutates `process.env`, returning a structured diagnostic (never a raw value) for malformed input.
+- Terminal and JSON reporters that derive finding titles from the fixed rule catalog (never free-form text) and pass every string-bearing output field through a final sanitization boundary (`core/output-safety.ts`) before printing. Adversarial tests prove that a sentinel value placed in the audit-level message, a finding's metadata key/value, or a nested structure does not appear in terminal or JSON output when it has been registered with the run's `SecretRegistry`; this is defense in depth, not a guarantee for arbitrary unregistered raw values a future adapter might mishandle.
+- A static, code-only internal-error message at the CLI's top level: the original `Error.message` and stack are never printed, regardless of what a thrown error contains.
 - No telemetry, no analytics, no network calls, no update checks, no postinstall scripts.
 
 ## Planned (not yet implemented)

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUDIT_HELP, executeAuditCommand } from './commands/audit.js';
-import { sanitizeError } from './core/redaction.js';
+import { reportInternalError } from './core/internal-error.js';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
@@ -20,7 +20,8 @@ Status:
 
 Exit codes:
   0  The command completed. For "audit", inspect the reported status field.
-  1  Internal error (message is sanitized to avoid leaking configuration values).
+  1  Internal error. A static message and a non-sensitive error code are
+     printed; the original error message and stack are never shown.
   2  Usage error (unknown command or invalid option).
 
 Security:
@@ -81,7 +82,7 @@ function main(argv: readonly string[]): number {
 try {
   process.exitCode = main(process.argv.slice(2));
 } catch (error) {
-  const sanitized = sanitizeError(error, []);
-  process.stderr.write(`procseal encountered an internal error: ${sanitized.message}\n`);
-  process.exitCode = 1;
+  const { message, exitCode } = reportInternalError(error);
+  process.stderr.write(message);
+  process.exitCode = exitCode;
 }

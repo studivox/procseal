@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 const KEY_BYTES = 32;
 const KEY_ID_BYTES = 8;
@@ -6,40 +6,55 @@ const KEY_ID_BYTES = 8;
 /**
  * Fingerprint output is truncated for readable terminal/JSON output. This
  * truncation is a display convenience only. See docs/THREAT_MODEL.md — a
- * truncated fingerprint MUST NOT be treated as an authentication token or a
- * security boundary, only as a same-run comparison hint.
+ * truncated fingerprint MUST NOT be treated as an authentication token, a
+ * security boundary, or the equality primitive for rule PS004. Equality
+ * comparisons must go through `equals()`, which uses the full digest.
  */
-const TRUNCATED_HEX_LENGTH = 16;
+const DISPLAY_HEX_LENGTH = 16;
 
 export interface Fingerprinter {
   /** Opaque, random label for this run. Safe to display; not derived from the key. */
   readonly keyId: string;
   /**
-   * Returns a keyed HMAC-SHA-256 fingerprint of `value`, truncated for display.
-   * The same value fingerprints identically within one Fingerprinter instance
-   * (one run) and differently across instances (different runs), because the
-   * HMAC key is freshly randomized per instance and never persisted.
+   * Truncated, human-readable HMAC-SHA-256 digest of `value`, for display
+   * only. Two different values can — and eventually will — collide in this
+   * truncated form; do not use it to decide whether two values are equal.
    */
-  fingerprint(value: string): string;
+  displayFingerprint(value: string): string;
+  /**
+   * The only supported way to compare two values for equality within a
+   * run. Computes the full-length HMAC-SHA-256 digest of each value and
+   * compares them with `timingSafeEqual`, never returning or exposing
+   * either digest.
+   */
+  equals(left: string, right: string): boolean;
 }
 
 /**
  * Creates a fresh, random, in-memory-only HMAC key and returns a
- * fingerprinter bound to it. Never persist the returned key or any
- * fingerprint it produces; both are only meaningful for the lifetime of the
- * current process.
+ * fingerprinter bound to it. Never persist the key, nor any full digest it
+ * produces; both are only meaningful for the lifetime of the current
+ * process. Neither is ever returned by this module — only a truncated
+ * display digest (`displayFingerprint`) or a boolean equality result
+ * (`equals`) leave this closure.
  */
 export function createFingerprinter(): Fingerprinter {
   const key = randomBytes(KEY_BYTES);
   const keyId = randomBytes(KEY_ID_BYTES).toString('hex');
 
+  function fullDigest(value: string): Buffer {
+    return createHmac('sha256', key).update(value, 'utf8').digest();
+  }
+
   return {
     keyId,
-    fingerprint(value: string): string {
-      return createHmac('sha256', key)
-        .update(value, 'utf8')
-        .digest('hex')
-        .slice(0, TRUNCATED_HEX_LENGTH);
+    displayFingerprint(value: string): string {
+      return fullDigest(value).toString('hex').slice(0, DISPLAY_HEX_LENGTH);
+    },
+    equals(left: string, right: string): boolean {
+      const leftDigest = fullDigest(left);
+      const rightDigest = fullDigest(right);
+      return leftDigest.length === rightDigest.length && timingSafeEqual(leftDigest, rightDigest);
     },
   };
 }

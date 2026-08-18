@@ -32,6 +32,7 @@ test('handles quoted values, empty values, whitespace, comments, and duplicate k
 
   assert.equal(parsed.values.get('DUPLICATE_KEY'), 'sentinel-duplicate-second');
   assert.deepEqual(parsed.duplicateKeys, ['DUPLICATE_KEY']);
+  assert.deepEqual(parsed.diagnostics, []);
 });
 
 test('does not mutate process.env while parsing', () => {
@@ -39,4 +40,101 @@ test('does not mutate process.env while parsing', () => {
   parseDotenv('SOME_TEST_KEY=some-test-value\n');
   assert.deepEqual({ ...process.env }, before);
   assert.equal(process.env['SOME_TEST_KEY'], undefined);
+});
+
+test('strips a trailing comment after a double-quoted value', () => {
+  const parsed = parseDotenv('KEY="synthetic-value" # trailing comment\n');
+  assert.equal(parsed.values.get('KEY'), 'synthetic-value');
+  assert.deepEqual(parsed.diagnostics, []);
+});
+
+test('strips a trailing comment after a single-quoted value', () => {
+  const parsed = parseDotenv("KEY='synthetic-value' # trailing comment\n");
+  assert.equal(parsed.values.get('KEY'), 'synthetic-value');
+  assert.deepEqual(parsed.diagnostics, []);
+});
+
+test('treats a hash inside double quotes as a literal character, not a comment', () => {
+  const parsed = parseDotenv('KEY="synthetic # value not a comment"\n');
+  assert.equal(parsed.values.get('KEY'), 'synthetic # value not a comment');
+  assert.deepEqual(parsed.diagnostics, []);
+});
+
+test('treats a hash inside single quotes as a literal character, not a comment', () => {
+  const parsed = parseDotenv("KEY='synthetic # value not a comment'\n");
+  assert.equal(parsed.values.get('KEY'), 'synthetic # value not a comment');
+  assert.deepEqual(parsed.diagnostics, []);
+});
+
+test('unescapes an escaped double quote inside a double-quoted value', () => {
+  const parsed = parseDotenv('KEY="a \\"quoted\\" word"\n');
+  assert.equal(parsed.values.get('KEY'), 'a "quoted" word');
+});
+
+test('keeps a backslash literal inside a single-quoted value (no escape processing)', () => {
+  const parsed = parseDotenv("KEY='a \\backslash word'\n");
+  assert.equal(parsed.values.get('KEY'), 'a \\backslash word');
+});
+
+test('parses an empty double-quoted value', () => {
+  const parsed = parseDotenv('KEY=""\n');
+  assert.equal(parsed.values.get('KEY'), '');
+  assert.deepEqual(parsed.diagnostics, []);
+});
+
+test('parses an empty single-quoted value', () => {
+  const parsed = parseDotenv("KEY=''\n");
+  assert.equal(parsed.values.get('KEY'), '');
+  assert.deepEqual(parsed.diagnostics, []);
+});
+
+test('handles CRLF line endings', () => {
+  const parsed = parseDotenv('FIRST=synthetic-one\r\nSECOND=synthetic-two\r\n');
+  assert.equal(parsed.values.get('FIRST'), 'synthetic-one');
+  assert.equal(parsed.values.get('SECOND'), 'synthetic-two');
+});
+
+test('supports the export keyword before a key', () => {
+  const parsed = parseDotenv('export KEY=synthetic-value\n');
+  assert.equal(parsed.values.get('KEY'), 'synthetic-value');
+});
+
+test('records duplicate keys, keeping the last value', () => {
+  const parsed = parseDotenv('KEY=first\nKEY=second\nKEY=third\n');
+  assert.equal(parsed.values.get('KEY'), 'third');
+  assert.deepEqual(parsed.duplicateKeys, ['KEY']);
+});
+
+test('reports an unterminated double-quoted value as a diagnostic without a value', () => {
+  const parsed = parseDotenv('KEY="unterminated\n');
+  assert.equal(parsed.values.has('KEY'), false);
+  assert.deepEqual(parsed.diagnostics, [{ line: 1, key: 'KEY', reason: 'unterminated-quote' }]);
+});
+
+test('reports an unterminated single-quoted value as a diagnostic without a value', () => {
+  const parsed = parseDotenv("KEY='unterminated\n");
+  assert.equal(parsed.values.has('KEY'), false);
+  assert.deepEqual(parsed.diagnostics, [{ line: 1, key: 'KEY', reason: 'unterminated-quote' }]);
+});
+
+test('reports trailing content after a closed quote as a diagnostic without a misleading value', () => {
+  const parsed = parseDotenv('KEY="value"garbage\n');
+  assert.equal(parsed.values.has('KEY'), false);
+  assert.deepEqual(parsed.diagnostics, [
+    { line: 1, key: 'KEY', reason: 'trailing-content-after-quote' },
+  ]);
+});
+
+test('reports a malformed line with no "=" as an invalid-line diagnostic', () => {
+  const parsed = parseDotenv('THIS_IS_NOT_KEY_VALUE\n');
+  assert.equal(parsed.values.size, 0);
+  assert.deepEqual(parsed.diagnostics, [{ line: 1, reason: 'invalid-line' }]);
+});
+
+test('a diagnostic never carries the raw attempted value', () => {
+  const parsed = parseDotenv('SECRET="unterminated-sentinel-value-should-not-appear\n');
+  for (const diagnostic of parsed.diagnostics) {
+    const serialized = JSON.stringify(diagnostic);
+    assert.equal(serialized.includes('unterminated-sentinel-value-should-not-appear'), false);
+  }
 });

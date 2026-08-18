@@ -27,6 +27,49 @@ been published to npm.
 - GitHub Actions CI running install, format check, lint, typecheck, tests,
   build, and a package dry-run on Node.js 20 and 22.
 
+### Security
+
+A follow-up review of the CLI foundation identified several correctness and
+defense-in-depth gaps before findings and live process data exist at all.
+Corrected here, ahead of the PM2 adapter that will actually produce them:
+
+- `Finding` no longer has a free-form `message` field. Displayed titles are
+  always derived from the fixed rule catalog (`getRuleTitle`), and
+  `details` may only hold values validated against a conservative character
+  set and length limit (`core/label.ts`, `createFinding` in
+  `core/types.ts`).
+- Both reporters now pass every string-bearing output field — including the
+  audit-level message, status, and finding metadata — through a final,
+  independent sanitization boundary (`core/output-safety.ts`) immediately
+  before writing it, backed by a run-scoped `SecretRegistry`
+  (`core/secret-registry.ts`). This does not assume upstream validation
+  already happened.
+- The CLI's top-level error handler no longer attempts substring redaction
+  with an empty known-values list (which redacted nothing). It now prints a
+  static message and a coarse, pattern-validated error code only —
+  `Error.message` and stack are never shown (`core/internal-error.ts`).
+- `Fingerprinter` no longer exposes a single `fingerprint()` method that
+  could be mistaken for an equality check. It now exposes
+  `displayFingerprint()` (truncated, display-only) and `equals()` (full
+  HMAC-SHA-256 digest, compared with `timingSafeEqual`) as separate
+  operations; neither the key nor the full digest is ever returned.
+- The dotenv parser was rewritten as a small hand-written scanner to
+  correctly handle trailing comments after quoted values, a `#` inside
+  quotes, escaped double quotes, empty quoted values, CRLF input, and
+  `export KEY=value`, and to report malformed/unterminated quotes as a
+  structured diagnostic (line, key, reason) instead of a misleading value.
+- README no longer shows `npx procseal ...` under "Try it now" as if it
+  currently works; the package is private and not published. Local-clone
+  instructions are the only currently-working path, with `npx` clearly
+  labeled as the future, post-publication command.
+
+Adversarial tests were added proving that a sentinel value placed in the
+audit-level message, a finding's metadata key or value, or a value nested
+inside metadata does not appear in terminal or JSON output once registered
+with the run's `SecretRegistry`; and that a thrown error containing a
+sentinel never reaches the CLI's stderr output, with or without that
+sentinel being known to any registry.
+
 ### Notes
 
 - `procseal audit` does not yet inspect any real machine or PM2 process. It

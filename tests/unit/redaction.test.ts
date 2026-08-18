@@ -25,3 +25,11 @@ test('sanitizeMessage leaves text unchanged when no known values are present', (
   const message = 'a generic error with no secret content';
   assert.equal(sanitizeMessage(message, [SENTINEL_JWT_SECRET]), message);
 });
+
+test('sanitizeMessage cannot redact a value that is not in the known-values list', () => {
+  // Documents why the CLI's top-level catch (core/internal-error.ts) does not
+  // rely on this function: an incomplete known-values registry provides no
+  // protection at all for the values it does not know about.
+  const message = `secret is ${SENTINEL_JWT_SECRET}`;
+  assert.equal(sanitizeMessage(message, []), message);
+});

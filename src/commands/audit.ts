@@ -1,3 +1,4 @@
+import { createSecretRegistry } from '../core/output-safety.js';
 import type { AuditResult } from '../core/types.js';
 import { renderJsonReport } from '../reporters/json.js';
 import { renderTerminalReport } from '../reporters/terminal.js';
@@ -27,7 +28,8 @@ Status:
 
 Exit codes:
   0  The command ran successfully. Inspect the reported "status" field.
-  1  Internal error (message is sanitized to avoid leaking configuration values).
+  1  Internal error. A static message and a non-sensitive error code are
+     printed; the original error message and stack are never shown.
   2  Usage error (unknown option).
 `;
 
@@ -56,6 +58,9 @@ export function executeAuditCommand(
   version: string,
 ): AuditCommandResult {
   const result = runPlaceholderAudit(version);
-  const output = options.json ? renderJsonReport(result) : renderTerminalReport(result);
+  const registry = createSecretRegistry();
+  const output = options.json
+    ? renderJsonReport(result, registry)
+    : renderTerminalReport(result, registry);
   return { output, exitCode: 0 };
 }
