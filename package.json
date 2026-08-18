@@ -1,0 +1,55 @@
+{
+  "name": "procseal",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "Local-first CLI that detects configuration and secret drift in PM2-managed processes, without revealing secret values.",
+  "keywords": [
+    "pm2",
+    "cli",
+    "secrets",
+    "configuration",
+    "drift",
+    "devops",
+    "security"
+  ],
+  "homepage": "https://github.com/studivox/procseal#readme",
+  "bugs": "https://github.com/studivox/procseal/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/studivox/procseal.git"
+  },
+  "license": "MIT",
+  "author": "Volkan Cevik (DEDU LTD)",
+  "type": "module",
+  "engines": {
+    "node": "^20.0.0 || ^22.0.0"
+  },
+  "bin": {
+    "procseal": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "test": "tsx --test $(find tests -name '*.test.ts')"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "eslint": "^10.8.1",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0"
+  }
+}
