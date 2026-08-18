@@ -36,8 +36,21 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Adapter integration tests
+        run: npm run test:integration
+
+      - name: Isolated real-PM2 E2E test
+        run: npm run test:e2e
+        env:
+          # Belt-and-suspenders: even though the test itself always derives
+          # PM2_HOME from a fresh mkdtemp() directory (see
+          # tests/e2e/pm2-isolation-guard.ts), the runner's own PM2_HOME is
+          # deliberately left unset here so there is no ambient real PM2_HOME
+          # for a test bug to accidentally inherit.
+          PM2_HOME: ''
 
       - name: Build
         run: npm run build
