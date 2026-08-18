@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import { lstatSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
@@ -142,39 +142,100 @@ const PID_FILE_NAME = 'pm2.pid';
 const STRICT_PID_PATTERN = /^[1-9][0-9]*$/;
 
 /**
+ * A real PID file written by PM2 is a handful of decimal digits — this is
+ * deliberately generous (any real PID on any real OS is far shorter) while
+ * still bounding how much we'll ever read into memory for a file that is
+ * supposed to contain nothing but a small integer.
+ */
+const MAX_PID_FILE_BYTES = 64;
+
+/**
+ * The three, and only three, states a lookup of the isolated daemon's
+ * pidfile can end in:
+ * - `'absent'`: the pidfile genuinely does not exist. There is no evidence
+ *   a daemon ever wrote one — nothing to verify, and nothing to fail
+ *   closed over.
+ * - `'valid'`: the pidfile exists and its content strictly parses to a
+ *   safe, checkable PID.
+ * - `'unverifiable'`: the pidfile *exists in some form* — malformed
+ *   content, an oversized file, a non-regular file (directory, symlink,
+ *   device, ...), or a file that could not be stat-ed or read for some
+ *   other reason — but its liveness cannot be safely confirmed. This is
+ *   deliberately **not** collapsed into `'absent'`: a pidfile that exists
+ *   but can't be trusted is evidence a daemon *might* still be running,
+ *   and must fail closed rather than being silently treated as "nothing
+ *   to check."
+ */
+export type DaemonPidLookup =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'valid'; readonly pid: number }
+  | { readonly kind: 'unverifiable'; readonly reason: string };
+
+/**
  * Reads and strictly parses the isolated daemon's own PID file. PM2 writes
  * its God-daemon PID as plain decimal text to `<PM2_HOME>/pm2.pid`
  * (`PM2_PID_FILE_PATH` in PM2's own `constants.js`, written by
  * `lib/Daemon.js`) and removes that file again on a graceful exit — which
  * is exactly why this must be called *before* `pm2 kill`, not after.
  *
- * Only ever reads this one fixed filename, joined onto the
+ * Only ever inspects this one fixed filename, joined onto the
  * already-validated `pm2Home` — never a wildcard search, never any other
- * path. Returns `undefined` (never throws) for anything that is missing,
- * unreadable, or does not parse as a strict positive integer distinct from
- * this process's own PID — including `"0"`, negative numbers, non-numeric
- * text, and `process.pid` itself, none of which this function will ever
- * hand back as a "safe to check" PID.
+ * path. Never throws.
+ *
+ * Uses `lstatSync` (not `statSync`) deliberately: it does not follow
+ * symlinks, so a `pm2.pid` that is itself a symlink is classified as
+ * non-regular (`'unverifiable'`) rather than silently stat-ing or reading
+ * through to whatever it points at. The size check runs before any read,
+ * so an oversized file is never read into memory at all. There is an
+ * inherent, unavoidable stat-then-read race on any filesystem check like
+ * this; the size and type checks are a best-effort guard, not a hard
+ * security boundary — see docs/THREAT_MODEL.md.
  */
-export function readIsolatedDaemonPid(pm2Home: string): number | undefined {
+export function readIsolatedDaemonPid(pm2Home: string): DaemonPidLookup {
+  const pidFilePath = join(pm2Home, PID_FILE_NAME);
+
+  let stats;
+  try {
+    stats = lstatSync(pidFilePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'absent' };
+    }
+    return { kind: 'unverifiable', reason: 'pidfile could not be inspected' };
+  }
+
+  if (!stats.isFile()) {
+    return { kind: 'unverifiable', reason: 'pidfile is not a regular file' };
+  }
+
+  if (stats.size > MAX_PID_FILE_BYTES) {
+    return { kind: 'unverifiable', reason: 'pidfile is larger than a PID file should ever be' };
+  }
+
   let raw: string;
   try {
-    raw = readFileSync(join(pm2Home, PID_FILE_NAME), 'utf8');
+    raw = readFileSync(pidFilePath, 'utf8');
   } catch {
-    return undefined;
+    return { kind: 'unverifiable', reason: 'pidfile exists but could not be read' };
   }
 
   const trimmed = raw.trim();
   if (!STRICT_PID_PATTERN.test(trimmed)) {
-    return undefined;
+    return { kind: 'unverifiable', reason: 'pidfile content is not a strictly formatted PID' };
   }
 
   const pid = Number(trimmed);
-  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) {
-    return undefined;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { kind: 'unverifiable', reason: 'pidfile content parsed to an unsafe PID value' };
+  }
+  if (pid === process.pid) {
+    return {
+      kind: 'unverifiable',
+      reason: "pidfile PID matches this process's own PID",
+    };
   }
 
-  return pid;
+  return { kind: 'valid', pid };
 }
 
 /**
@@ -233,20 +294,26 @@ export interface CleanupIsolatedPm2Params extends CleanupSafetyParams {
  * `pm2 kill` (or any deletion command) is only ever issued here, and only
  * after `assertSafeToCleanIsolatedPm2Home` passes.
  *
- * Unlike an earlier version of this function, the temporary directory is
- * **not** removed unconditionally in a `finally` block. It is removed only
- * after:
+ * The temporary directory is **not** removed unconditionally in a
+ * `finally` block. It is removed only after:
  * 1. the safety guard passed,
- * 2. `pm2 kill` completed without throwing, and
- * 3. either there was no isolated daemon PID to check (nothing captured
- *    before step 2, e.g. the daemon had already exited), or that PID is
- *    confirmed no longer alive.
+ * 2. `pm2 kill` completed without throwing (it is still attempted even
+ *    when the pidfile lookup below came back `'unverifiable'` — refusing
+ *    to *delete* is not the same as refusing to *attempt* the guarded
+ *    kill), and
+ * 3. the pidfile lookup performed *before* kill ran was either `'absent'`
+ *    (nothing captured — e.g. the daemon had already exited — so there is
+ *    nothing to verify) or `'valid'` and that PID is now confirmed no
+ *    longer alive.
  *
- * If `pm2 kill` throws, or the daemon PID is still observably alive after
- * it returns, this function throws `CleanupIncompleteError` and leaves the
- * temporary directory — and whatever the daemon left on disk — in place,
- * rather than deleting it out from under a process that might still be
- * running.
+ * If `pm2 kill` throws, if the pidfile lookup came back `'unverifiable'`
+ * (a pidfile existed but its content or type couldn't be trusted — see
+ * `readIsolatedDaemonPid`), or if a `'valid'` daemon PID is still
+ * observably alive after kill returns, this function throws
+ * `CleanupIncompleteError` and leaves the temporary directory — and
+ * whatever the daemon left on disk — in place, rather than deleting it
+ * out from under a process that might still be running. Only a genuinely
+ * `'absent'` pidfile ever takes the "nothing to verify" path.
  */
 export async function cleanupIsolatedPm2(params: CleanupIsolatedPm2Params): Promise<void> {
   assertSafeToCleanIsolatedPm2Home(params);
@@ -256,7 +323,7 @@ export async function cleanupIsolatedPm2(params: CleanupIsolatedPm2Params): Prom
   // PM2 removes its own pidfile on a graceful exit (see
   // readIsolatedDaemonPid's docs), so this must be captured before kill
   // runs, not after.
-  const daemonPid = readIsolatedDaemonPid(pm2Home);
+  const daemonPidLookup = readIsolatedDaemonPid(pm2Home);
 
   try {
     await killRunner(params.pm2Binary, { ...process.env, PM2_HOME: pm2Home });
@@ -267,10 +334,16 @@ export async function cleanupIsolatedPm2(params: CleanupIsolatedPm2Params): Prom
     );
   }
 
-  if (daemonPid !== undefined) {
+  if (daemonPidLookup.kind === 'unverifiable') {
+    throw new CleanupIncompleteError(
+      `refusing to remove the isolated PM2_HOME: the daemon PID could not be verified (${daemonPidLookup.reason})`,
+    );
+  }
+
+  if (daemonPidLookup.kind === 'valid') {
     const attempts = params.verifyPollAttempts ?? DEFAULT_VERIFY_POLL_ATTEMPTS;
     const intervalMs = params.verifyPollIntervalMs ?? DEFAULT_VERIFY_POLL_INTERVAL_MS;
-    const confirmedDead = await waitUntilProcessDead(daemonPid, attempts, intervalMs);
+    const confirmedDead = await waitUntilProcessDead(daemonPidLookup.pid, attempts, intervalMs);
     if (!confirmedDead) {
       throw new CleanupIncompleteError(
         'refusing to remove the isolated PM2_HOME: the daemon PID is still alive after "pm2 kill" reported success',
@@ -278,5 +351,6 @@ export async function cleanupIsolatedPm2(params: CleanupIsolatedPm2Params): Prom
     }
   }
 
+  // daemonPidLookup.kind === 'absent': nothing was ever captured to verify.
   rmSync(params.tempDir, { recursive: true, force: true });
 }

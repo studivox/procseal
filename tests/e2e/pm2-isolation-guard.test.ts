@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -242,7 +250,7 @@ test('cleanupIsolatedPm2() does NOT remove the tempDir when the kill runner fail
   assert.equal(existsSync(join(pm2Home, 'pm2.pid')), true);
 });
 
-test('readIsolatedDaemonPid: strict parsing — malformed and unsafe pidfile contents', () => {
+test('readIsolatedDaemonPid: malformed or unsafe pidfile *content* classifies as unverifiable, not absent', () => {
   const tempDir = makeTempDir();
 
   const cases: Record<string, string> = {
@@ -260,31 +268,81 @@ test('readIsolatedDaemonPid: strict parsing — malformed and unsafe pidfile con
   for (const [label, content] of Object.entries(cases)) {
     const pm2Home = join(tempDir, `case-${label}`);
     writePidFile(pm2Home, content);
-    const pid = readIsolatedDaemonPid(pm2Home);
+    const lookup = readIsolatedDaemonPid(pm2Home);
     assert.equal(
-      pid,
-      undefined,
-      `expected case "${label}" (content=${JSON.stringify(content)}) to be rejected`,
+      lookup.kind,
+      'unverifiable',
+      `expected case "${label}" (content=${JSON.stringify(content)}) to be unverifiable, got ${lookup.kind}`,
     );
   }
 });
 
-test('readIsolatedDaemonPid: missing pidfile and missing directory both return undefined without throwing', () => {
+test('readIsolatedDaemonPid: a genuinely absent pidfile — or an absent PM2_HOME directory — classifies as absent, never unverifiable', () => {
   const tempDir = makeTempDir();
   const missingDirPm2Home = join(tempDir, 'never-created');
   assert.doesNotThrow(() => readIsolatedDaemonPid(missingDirPm2Home));
-  assert.equal(readIsolatedDaemonPid(missingDirPm2Home), undefined);
+  assert.deepEqual(readIsolatedDaemonPid(missingDirPm2Home), { kind: 'absent' });
 
   const missingFilePm2Home = join(tempDir, 'dir-exists-no-pidfile');
   mkdirSync(missingFilePm2Home, { recursive: true });
-  assert.equal(readIsolatedDaemonPid(missingFilePm2Home), undefined);
+  assert.deepEqual(readIsolatedDaemonPid(missingFilePm2Home), { kind: 'absent' });
+});
+
+test('readIsolatedDaemonPid: an oversized pidfile is unverifiable, and its content is never fully read', () => {
+  const tempDir = makeTempDir();
+  const pm2Home = join(tempDir, 'oversized');
+  // Far past any real PID's length. Also happens to embed what looks like
+  // a well-formed PID at the very end, to prove the size check rejects it
+  // before content parsing ever gets a chance to accept it.
+  writePidFile(pm2Home, `${'0'.repeat(500)}424242`);
+  const lookup = readIsolatedDaemonPid(pm2Home);
+  assert.equal(lookup.kind, 'unverifiable');
+});
+
+test('readIsolatedDaemonPid: a non-regular pidfile (a directory in its place) is unverifiable', () => {
+  const tempDir = makeTempDir();
+  const pm2Home = join(tempDir, 'non-regular');
+  // "pm2.pid" is itself a directory, not a file.
+  mkdirSync(join(pm2Home, 'pm2.pid'), { recursive: true });
+  const lookup = readIsolatedDaemonPid(pm2Home);
+  assert.equal(lookup.kind, 'unverifiable');
+});
+
+test('readIsolatedDaemonPid: a symlinked pidfile is unverifiable — symlinks are never followed', () => {
+  const tempDir = makeTempDir();
+  const pm2Home = join(tempDir, 'symlinked');
+  mkdirSync(pm2Home, { recursive: true });
+  // Points at a file that would itself parse as a perfectly valid PID, to
+  // prove rejection is because it's a symlink (lstat, not stat), not
+  // because the link target happens to be bad.
+  const targetPath = join(tempDir, 'valid-target');
+  writeFileSync(targetPath, '55555', 'utf8');
+  symlinkSync(targetPath, join(pm2Home, 'pm2.pid'));
+
+  const lookup = readIsolatedDaemonPid(pm2Home);
+  assert.equal(lookup.kind, 'unverifiable');
+});
+
+test('readIsolatedDaemonPid: an unreadable pidfile is unverifiable', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    // Running as root bypasses file permission checks entirely — chmod
+    // 0 would still be readable, so this case cannot be exercised here.
+    return;
+  }
+  const tempDir = makeTempDir();
+  const pm2Home = join(tempDir, 'unreadable');
+  writePidFile(pm2Home, '12345');
+  chmodSync(join(pm2Home, 'pm2.pid'), 0o000);
+
+  const lookup = readIsolatedDaemonPid(pm2Home);
+  assert.equal(lookup.kind, 'unverifiable');
 });
 
 test('readIsolatedDaemonPid: accepts a well-formed positive integer, trimming surrounding whitespace', () => {
   const tempDir = makeTempDir();
   const pm2Home = join(tempDir, 'well-formed');
   writePidFile(pm2Home, '  424242  \n');
-  assert.equal(readIsolatedDaemonPid(pm2Home), 424242);
+  assert.deepEqual(readIsolatedDaemonPid(pm2Home), { kind: 'valid', pid: 424242 });
 });
 
 test('readIsolatedDaemonPid only ever reads the fixed pm2.pid filename inside the given directory, never elsewhere', () => {
@@ -293,7 +351,7 @@ test('readIsolatedDaemonPid only ever reads the fixed pm2.pid filename inside th
   mkdirSync(pm2Home, { recursive: true });
   // A pidfile placed one level up (outside pm2Home) must never be read.
   writeFileSync(join(tempDir, 'pm2.pid'), '999', 'utf8');
-  assert.equal(readIsolatedDaemonPid(pm2Home), undefined);
+  assert.deepEqual(readIsolatedDaemonPid(pm2Home), { kind: 'absent' });
 });
 
 test('isProcessAlive() reports the current process as alive', () => {
@@ -305,22 +363,52 @@ test('isProcessAlive() reports an implausible, definitely-unused PID as not aliv
   assert.equal(isProcessAlive(2 ** 30), false);
 });
 
-test('cleanupIsolatedPm2() proceeds and removes the tempDir when the pidfile is malformed (nothing unsafe was ever checked)', async () => {
+test('cleanupIsolatedPm2() does NOT remove the tempDir when the pidfile is malformed — fails closed instead of treating it as "nothing to check"', async () => {
   const tempDir = makeTempDir();
   const pm2Home = join(tempDir, 'pm2home');
-  writePidFile(pm2Home, '0'); // rejected by readIsolatedDaemonPid -> no PID to verify
+  writePidFile(pm2Home, '0'); // exists, but strictly invalid -> 'unverifiable', not 'absent'
 
-  await cleanupIsolatedPm2({
-    pm2Home,
-    tempDir,
-    realPm2Home: REAL_PM2_HOME,
-    pm2Binary: 'pm2',
-    killRunner: async () => {
-      /* simulate a successful "pm2 kill" */
-    },
-  });
+  await assert.rejects(
+    cleanupIsolatedPm2({
+      pm2Home,
+      tempDir,
+      realPm2Home: REAL_PM2_HOME,
+      pm2Binary: 'pm2',
+      killRunner: async () => {
+        /* simulate a successful "pm2 kill" */
+      },
+    }),
+    CleanupIncompleteError,
+  );
 
-  assert.equal(existsSync(tempDir), false);
+  assert.equal(existsSync(tempDir), true);
+  assert.equal(existsSync(join(pm2Home, 'pm2.pid')), true);
+});
+
+test('cleanupIsolatedPm2() does NOT remove the tempDir when the pidfile is a non-regular file — kill is still attempted, but nothing is deleted', async () => {
+  const tempDir = makeTempDir();
+  const pm2Home = join(tempDir, 'pm2home');
+  mkdirSync(join(pm2Home, 'pm2.pid'), { recursive: true }); // directory, not a file
+  let killAttempted = false;
+
+  await assert.rejects(
+    cleanupIsolatedPm2({
+      pm2Home,
+      tempDir,
+      realPm2Home: REAL_PM2_HOME,
+      pm2Binary: 'pm2',
+      killRunner: async () => {
+        killAttempted = true;
+        /* simulate a successful "pm2 kill" */
+      },
+    }),
+    CleanupIncompleteError,
+  );
+
+  // The guarded kill is still attempted even though the pidfile can't be
+  // verified — only the deletion is withheld.
+  assert.equal(killAttempted, true);
+  assert.equal(existsSync(tempDir), true);
 });
 
 test('cleanupIsolatedPm2() refuses to delete when the daemon PID is still alive after kill reports success', async (t) => {

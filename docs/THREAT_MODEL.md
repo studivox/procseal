@@ -266,22 +266,43 @@ public CLI yet — see "What ProcSeal is not" above.
   (`tests/e2e/pm2-isolation-guard.test.ts`) proving the kill command is
   never invoked, and nothing is deleted, when any check fails.
 - The temporary directory is deleted only after a _confirmed-complete_
-  teardown, not unconditionally in a `finally` block: `cleanupIsolatedPm2`
-  reads the isolated daemon's own PID from its pidfile (PM2's documented
-  `<PM2_HOME>/pm2.pid`, read _before_ `pm2 kill` runs, since PM2 removes
-  this file on a graceful exit) using strict parsing that rejects `0`,
-  negative numbers, non-numeric text, and — specifically — the test
-  process's own PID; runs `pm2 kill`; and, if a PID was captured, polls a
-  safe signal-`0` existence probe (`process.kill(pid, 0)`, which delivers
-  no actual signal) until that PID is confirmed dead. If `pm2 kill` throws,
-  or the daemon PID is still observably alive after it returns, cleanup
-  throws `CleanupIncompleteError` and leaves the temporary directory (and
-  whatever the daemon left on disk) in place, rather than risk deleting
-  `PM2_HOME` out from under a process that might still be running.
-  `pm2-isolation-guard.test.ts` covers malformed/unsafe pidfile contents,
-  a kill failure that must not delete anything, a still-alive PID that
-  must not delete anything, and a confirmed-dead PID that completes
-  teardown.
+  teardown, not unconditionally in a `finally` block. Before `pm2 kill`
+  runs (PM2 removes its pidfile on a graceful exit, so this must happen
+  first), `cleanupIsolatedPm2` looks up the isolated daemon's own PID from
+  its pidfile (PM2's documented `<PM2_HOME>/pm2.pid`) via
+  `readIsolatedDaemonPid`, which returns one of exactly three states —
+  never a single ambiguous "nothing found":
+  - `'absent'` — the pidfile genuinely does not exist. Nothing was ever
+    captured, so there is nothing to verify.
+  - `'valid'` — the pidfile exists and its content strictly parses to a
+    safe PID (rejecting `0`, negative numbers, non-numeric text, and —
+    specifically — the test process's own PID).
+  - `'unverifiable'` — the pidfile _exists in some form_ but cannot be
+    trusted: malformed content, an oversized file, a non-regular file
+    (checked with `lstatSync`, which does not follow symlinks — a
+    symlinked pidfile is rejected as non-regular rather than read through
+    to its target), or a file that could not be stat'd or read. This is
+    deliberately **not** collapsed into `'absent'`: a pidfile that exists
+    but can't be trusted is evidence a daemon _might_ still be running.
+
+  `pm2 kill` is still attempted regardless of which state the lookup
+  returned — refusing to _delete_ is not the same as refusing to
+  _attempt_ the already-guarded kill. After kill runs: if it threw, cleanup
+  throws `CleanupIncompleteError` immediately. Otherwise, an `'absent'`
+  lookup proceeds straight to deletion (nothing to verify); a `'valid'`
+  lookup polls a safe signal-`0` existence probe (`process.kill(pid, 0)`,
+  which delivers no actual signal) until that PID is confirmed dead, and
+  throws `CleanupIncompleteError` without deleting if it's still alive; and
+  an `'unverifiable'` lookup throws `CleanupIncompleteError` without
+  deleting, unconditionally — verification was impossible, so cleanup
+  fails closed rather than guessing. In every `CleanupIncompleteError` case
+  the temporary directory (and whatever the daemon left on disk) is left
+  in place. `pm2-isolation-guard.test.ts` covers all three lookup states
+  (including oversized, non-regular, symlinked, and unreadable pidfiles
+  classifying as `'unverifiable'`), a kill failure that must not delete
+  anything, a still-alive PID that must not delete anything, and a
+  confirmed-dead PID that completes teardown.
+
 - `pm2` is a pinned, exact-version `devDependency` used only by this
   end-to-end test; it is never a runtime dependency of the published
   package. `npm pack --dry-run` confirms the published tarball contains no

@@ -289,6 +289,36 @@ issues, all fixed here before merge:
   is the real enforcement of `maxJsonPayloadBytes`, not `maxBuffer` itself.
   No implementation change; no stronger security claim was substituted for
   a real one.
+- **Fail-open cleanup on an unreadable/malformed pidfile.**
+  `cleanupIsolatedPm2`'s prior pidfile lookup returned a single
+  `number | undefined` from `readIsolatedDaemonPid`, so a genuinely absent
+  pidfile and an
+  _existing but malformed or unreadable_ one were indistinguishable —
+  both collapsed to "nothing to verify," letting cleanup proceed to delete
+  the temporary directory even when a pidfile that might reflect a real,
+  still-running daemon simply couldn't be trusted. `readIsolatedDaemonPid`
+  now returns a discriminated `DaemonPidLookup` with one of three `kind`
+  values: `'absent'` (no pidfile exists — nothing to verify, safe to
+  proceed), `'valid'` (content strictly parsed to a safe PID), or
+  `'unverifiable'` (a pidfile exists in some form — malformed content,
+  oversized, non-regular, or unreadable — but cannot be trusted). The
+  lookup now also uses `lstatSync` before reading, so an oversized pidfile
+  is never read
+  into memory and a symlinked pidfile is rejected as non-regular rather
+  than followed to its target. `cleanupIsolatedPm2` still attempts the
+  guarded `pm2 kill` regardless of the lookup's outcome (refusing to
+  _delete_ is not refusing to _attempt_ the kill), but only deletes the
+  temporary directory for `'absent'` (nothing to verify) or `'valid'` +
+  confirmed-dead; `'unverifiable'` now throws `CleanupIncompleteError` and
+  preserves the directory, exactly like a failed kill or a still-alive PID.
+  Replaced the test that previously asserted a malformed pidfile permits
+  deletion with one asserting the opposite. Added tests for each
+  `DaemonPidLookup` state — malformed content, oversized, non-regular
+  (directory in place of the file), symlinked, unreadable (skipped when
+  running as root, where permission bits don't apply), genuinely absent,
+  and well-formed — plus `cleanupIsolatedPm2`-level tests proving a
+  malformed or non-regular pidfile blocks deletion while still attempting
+  the guarded kill.
 
 ### Notes
 
