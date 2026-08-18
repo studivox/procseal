@@ -4,27 +4,32 @@ This roadmap records intent, not release promises. Scope may change as the threa
 
 ## v0.1 — PM2 drift scanner
 
-- [ ] Document the threat model and redaction contract
-- [ ] Parse `.env` files without mutating the process environment
+- [x] Document the threat model and redaction contract
+- [x] Parse `.env` files without mutating the process environment
 - [ ] Read PM2 process metadata through a replaceable adapter
 - [ ] Compare declared configuration with live process state
 - [ ] Emit stable findings with severity and remediation text
-- [ ] Add terminal and JSON reporters
+- [x] Add terminal and JSON reporters
 - [ ] Test Linux and macOS behavior with synthetic fixtures
 - [ ] Publish a signed npm provenance build
 
+The CLI foundation (executable `procseal` command, shared types, HMAC
+fingerprinting, redaction, dotenv parsing, reporters) landed first as its
+own milestone. `procseal audit` reports an explicit `not_implemented`
+status until the PM2 adapter above ships.
+
 Planned initial rules:
 
-| Rule | Finding |
-| --- | --- |
-| PS001 | Declared and live values differ |
-| PS002 | Declared variable is missing from the live process |
-| PS003 | Unexpected variable exists in the live process |
-| PS004 | A sensitive value appears reused across applications |
-| PS005 | Declared and live ports differ |
-| PS006 | A deployment script contains a risky broad PM2 command |
+| Rule  | Finding                                                         |
+| ----- | --------------------------------------------------------------- |
+| PS001 | Declared and live values differ                                 |
+| PS002 | Declared variable is missing from the live process              |
+| PS003 | Unexpected variable exists in the live process                  |
+| PS004 | A sensitive value appears reused across applications            |
+| PS005 | Declared and live ports differ                                  |
+| PS006 | A deployment script contains a risky broad PM2 command          |
 | PS007 | A configuration file appears likely to expose plaintext secrets |
-| PS008 | PM2 dump state differs from the live process set |
+| PS008 | PM2 dump state differs from the live process set                |
 
 ## v0.2 — CI and platform integration
 

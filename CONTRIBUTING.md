@@ -34,4 +34,16 @@ Changes involving redaction, fingerprints, process inspection, file permissions,
 
 ## Development setup
 
-The executable package has not been published yet. Reproducible setup and test commands will be added with the first implementation milestone. Until then, documentation and specification contributions are welcome.
+The package is not published to npm yet; install and run it from a local clone.
+
+```bash
+npm ci
+npm run build          # compile TypeScript to dist/
+npm run typecheck      # tsc, no emit
+npm run lint            # eslint
+npm run format          # prettier --check
+npm test                 # node:test via tsx
+node dist/cli.js audit  # run the built CLI
+```
+
+Node.js 20 and 22 are supported and both are covered in CI (`.github/workflows/ci.yml`).

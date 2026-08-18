@@ -1,6 +1,6 @@
 name: Feature request
 description: Propose a focused ProcSeal capability or rule
-title: "[Feature]: "
+title: '[Feature]: '
 labels:
   - enhancement
 body:
