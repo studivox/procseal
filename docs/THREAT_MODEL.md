@@ -169,12 +169,19 @@ public CLI yet — see "What ProcSeal is not" above.
   targets another user's `PM2_HOME`.
 - Never runs any PM2 subcommand other than `jlist`. It never restarts,
   reloads, stops, deletes, saves, kills, or updates a PM2 process.
-- Enforces a command timeout and a strict combined stdout/stderr buffer
-  limit (`execFile`'s `timeout`/`maxBuffer` options), and independently
-  re-checks the raw payload size after receiving it — so an injected test
-  runner that bypasses `execFile` entirely is still bound by the same
-  limit. See `PM2_LIMITS` in `src/adapters/pm2.ts` for the exact numbers
-  and the reasoning behind each one.
+- Enforces a command timeout (`execFile`'s `timeout` option) and passes a
+  buffer limit to `execFile`'s `maxBuffer` option — but Node applies
+  `maxBuffer` to stdout and stderr **independently**, not as a combined
+  bound ("largest amount of data in bytes allowed on stdout **or**
+  stderr", per Node's own docs), so this is not a guarantee that combined
+  output is bounded by that number. The adapter's actual enforcement of
+  its intended payload-size limit is a separate, independent
+  `Buffer.byteLength` check against the received stdout string, which runs
+  for every `CommandRunner` — including an injected test fixture that
+  bypasses `execFile`, and therefore `maxBuffer`, entirely. See
+  `PM2_LIMITS` in `src/adapters/pm2.ts` and the comment on
+  `createExecFileCommandRunner` in `core/command-runner.ts` for the exact
+  numbers and this distinction in more detail.
 - The command runner is injected (`CommandRunner` in
   `core/command-runner.ts`), so unit and integration tests exercise every
   failure branch (missing binary, unavailable daemon, timeout, oversized
@@ -250,14 +257,31 @@ public CLI yet — see "What ProcSeal is not" above.
   proves the sentinel never appears in any serialization of the result
   (`JSON.stringify`, `util.inspect`). It never reads or modifies this
   machine's real `PM2_HOME` or PM2 daemon.
-- Cleanup (`tests/e2e/pm2-isolation-guard.ts`) runs in a `finally` block
-  and refuses — throwing rather than warning — to run any cleanup command,
-  including `pm2 kill`, unless `PM2_HOME` is present, non-empty, not equal
-  to the real `PM2_HOME`, and located inside the test's own temporary
-  directory (itself required to be inside the OS temp directory and not
-  the real home directory). The guard's refusal behavior has its own unit
-  tests (`tests/e2e/pm2-isolation-guard.test.ts`) proving the kill command
-  is never invoked, and nothing is deleted, when any check fails.
+- Cleanup (`tests/e2e/pm2-isolation-guard.ts`) refuses — throwing rather
+  than warning — to run any cleanup command, including `pm2 kill`, unless
+  `PM2_HOME` is present, non-empty, not equal to the real `PM2_HOME`, and
+  located inside the test's own temporary directory (itself required to be
+  inside the OS temp directory and not the real home directory). The
+  guard's refusal behavior has its own unit tests
+  (`tests/e2e/pm2-isolation-guard.test.ts`) proving the kill command is
+  never invoked, and nothing is deleted, when any check fails.
+- The temporary directory is deleted only after a _confirmed-complete_
+  teardown, not unconditionally in a `finally` block: `cleanupIsolatedPm2`
+  reads the isolated daemon's own PID from its pidfile (PM2's documented
+  `<PM2_HOME>/pm2.pid`, read _before_ `pm2 kill` runs, since PM2 removes
+  this file on a graceful exit) using strict parsing that rejects `0`,
+  negative numbers, non-numeric text, and — specifically — the test
+  process's own PID; runs `pm2 kill`; and, if a PID was captured, polls a
+  safe signal-`0` existence probe (`process.kill(pid, 0)`, which delivers
+  no actual signal) until that PID is confirmed dead. If `pm2 kill` throws,
+  or the daemon PID is still observably alive after it returns, cleanup
+  throws `CleanupIncompleteError` and leaves the temporary directory (and
+  whatever the daemon left on disk) in place, rather than risk deleting
+  `PM2_HOME` out from under a process that might still be running.
+  `pm2-isolation-guard.test.ts` covers malformed/unsafe pidfile contents,
+  a kill failure that must not delete anything, a still-alive PID that
+  must not delete anything, and a confirmed-dead PID that completes
+  teardown.
 - `pm2` is a pinned, exact-version `devDependency` used only by this
   end-to-end test; it is never a runtime dependency of the published
   package. `npm pack --dry-run` confirms the published tarball contains no

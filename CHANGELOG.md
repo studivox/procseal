@@ -199,6 +199,97 @@ cases.
   is uploaded anywhere — this remains true with the adapter in place,
   since it only ever reads a local PM2 daemon and returns data in-process.
 
+### Fixed
+
+An independent security review of this milestone's branch found four
+issues, all fixed here before merge:
+
+- **Incomplete SecretRegistry traversal.** `registerAllStringLeaves()` in
+  `src/adapters/pm2.ts` used recursive function calls with a depth cutoff
+  (`MAX_WALK_DEPTH = 64`) that silently stopped registering string leaves
+  past that depth — contradicting the documented guarantee that every
+  string leaf of a successfully parsed payload is registered. Node's
+  native `JSON.parse` can successfully build structures far deeper than a
+  handful of nested function calls can traverse without throwing "Maximum
+  call stack size exceeded" (empirically: a naive recursive walker
+  overflows well under 200,000 levels of nesting; `JSON.parse` itself
+  succeeds to at least 100,000 levels), so a sufficiently deep payload
+  could previously both parse successfully _and_ leave a deeply-nested
+  secret unregistered. Replaced with an iterative traversal using an
+  explicit array-based stack instead of the call stack: depth is now
+  bounded only by available memory (in practice, by `maxJsonPayloadBytes`,
+  since expressing depth _D_ requires at least _2D_ bytes of JSON text),
+  never by recursion, and every string leaf is registered regardless of
+  depth. No new error code was needed. Added adversarial tests with
+  payloads nested 500 and 100,000 levels deep, each proving the deepest
+  sentinel is registered (via `SecretRegistry.scrub`) and never appears in
+  a serialized result.
+- **Unsafe E2E daemon cleanup.** `cleanupIsolatedPm2()` in
+  `tests/e2e/pm2-isolation-guard.ts` previously deleted the isolated
+  `PM2_HOME` temporary directory in an unconditional `finally` block, even
+  when `pm2 kill` itself failed — which could erase the isolated daemon's
+  control files while leaving its process running, untracked, in the
+  background. Redesigned so the temporary directory is deleted only after
+  a confirmed-complete teardown:
+  - a new `readIsolatedDaemonPid()` reads PM2's own pidfile at the fixed,
+    documented location `<PM2_HOME>/pm2.pid` (verified empirically against
+    the pinned `pm2@7.0.3` devDependency) with strict parsing — `0`,
+    negative numbers, non-numeric text, and the current test process's own
+    PID are all rejected, never a source of an unsafe signal;
+  - the PID is captured **before** `pm2 kill` runs, since PM2 removes its
+    own pidfile on a graceful exit;
+  - a new `isProcessAlive()` sends only signal `0` (a non-destructive
+    existence probe, delivering no real signal) — there is no code path
+    that sends any other signal;
+  - if `pm2 kill` throws, cleanup now throws `CleanupIncompleteError` and
+    the temporary directory is left untouched;
+  - if `pm2 kill` succeeds and a PID was captured, cleanup polls
+    `isProcessAlive` until the PID is confirmed dead (or a bounded number
+    of attempts is exhausted) before deleting anything; a still-alive PID
+    also throws `CleanupIncompleteError` without deleting;
+  - the safety guard (`assertSafeToCleanIsolatedPm2Home`) still runs first
+    and unchanged, and is now a TypeScript assertion function that narrows
+    `pm2Home` to `string` for the rest of the call;
+  - no fallback to `pkill`, `killall`, `sudo`, a shell command, or a real
+    `PM2_HOME` was introduced — the only command run remains the existing
+    guarded `pm2 kill`.
+
+  Updated the existing test that previously asserted the temp directory
+  _is_ removed after a simulated kill failure to assert the opposite.
+  Added tests for strict PID parsing against malformed/unsafe pidfile
+  content (zero, negative, non-numeric, leading zero, a float, trailing
+  junk, empty/whitespace, and the test process's own PID), a missing
+  pidfile/directory, path-scoping (a pidfile one directory up is never
+  read), a still-alive-after-kill failure scenario against a real spawned
+  helper process, and a confirmed-dead successful teardown scenario
+  against a real spawned-and-exited helper process.
+
+- **Value limit measured in the wrong unit.** `maxValueLength` was
+  documented as "8 KiB" but compared against JavaScript's `string.length`,
+  which counts UTF-16 code units, not bytes — a multibyte-Unicode value
+  could be well under the intended byte budget while still under the
+  `.length`-based limit, or vice versa. Renamed the limit to
+  `maxValueBytes` and changed the check to
+  `Buffer.byteLength(valueString, 'utf8')`. Added boundary tests using
+  `'€'.repeat(n)` (1 UTF-16 code unit but 3 UTF-8 bytes per character)
+  proving a value under the code-unit count can still fail the byte limit,
+  and that a value within the byte limit is accepted. Still fails the
+  whole inspection on violation; never truncates and compares a partial
+  value.
+- **Inaccurate `maxBuffer` documentation.** Code comments and
+  `docs/THREAT_MODEL.md` described `execFile`'s `maxBuffer` option as a
+  combined stdout/stderr limit. Node applies it to stdout and stderr
+  _independently_ ("largest amount of data in bytes allowed on stdout
+  **or** stderr", per Node's own docs), not as a combined bound. Corrected
+  the documentation in `src/core/command-runner.ts` and
+  `docs/THREAT_MODEL.md` to state this accurately, and to make clear that
+  the adapter's own independent `Buffer.byteLength` check against the
+  received stdout — which runs for every `CommandRunner`, including
+  injected test fixtures that bypass `execFile` and `maxBuffer` entirely —
+  is the real enforcement of `maxJsonPayloadBytes`, not `maxBuffer` itself.
+  No implementation change; no stronger security claim was substituted for
+  a real one.
+
 ### Notes
 
 - PS001–PS008 detection logic (comparing declared configuration against

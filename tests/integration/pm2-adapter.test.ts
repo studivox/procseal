@@ -242,10 +242,44 @@ test('excessive value length fails fast with value_too_long, never truncating an
   const result = await inspectPm2({
     registry,
     runner: stdoutRunner(payload),
-    limits: { maxValueLength: 10 },
+    limits: { maxValueBytes: 10 },
   });
   assertErr(result);
   assert.equal(result.error.code, 'value_too_long');
+});
+
+test('the value limit is enforced in UTF-8 bytes, not JavaScript string length: a multibyte value can fail the byte limit while under the code-unit count', async () => {
+  const registry = createSecretRegistry();
+  // Each '€' (U+20AC) is 1 UTF-16 code unit (string.length counts it as 1)
+  // but 3 UTF-8 bytes. 400 of them is length 400 (well under a
+  // string-length limit of 500) but 1200 UTF-8 bytes (over a byte limit of
+  // 500) — proving the limit is measured in bytes, not `.length`.
+  const multibyteValue = '€'.repeat(400);
+  assert.equal(multibyteValue.length, 400);
+  assert.equal(Buffer.byteLength(multibyteValue, 'utf8'), 1200);
+
+  const payload = [pm2JlistEntry({ env: { SECRET: multibyteValue } })];
+  const result = await inspectPm2({
+    registry,
+    runner: stdoutRunner(payload),
+    limits: { maxValueBytes: 500 },
+  });
+  assertErr(result);
+  assert.equal(result.error.code, 'value_too_long');
+});
+
+test('a multibyte value within the byte limit is accepted even though earlier ASCII-only assumptions might undercount it', async () => {
+  const registry = createSecretRegistry();
+  const multibyteValue = '€'.repeat(100); // 100 code units, 300 UTF-8 bytes
+  const payload = [pm2JlistEntry({ env: { SECRET: multibyteValue } })];
+  const result = await inspectPm2({
+    registry,
+    runner: stdoutRunner(payload),
+    limits: { maxValueBytes: 300 },
+  });
+  assertOk(result);
+  const value = result.snapshot.processes[0]!.environmentVariables[0]!.value;
+  assert.equal(value.equalsPlain(multibyteValue), true);
 });
 
 test('hostile process names containing newlines and ANSI escapes never reach the safe name field raw', async () => {
@@ -287,6 +321,58 @@ test('a raw secret anywhere in the payload — even fields the snapshot never su
 
   const scrubbed = registry.scrub(`leaked path token=${SENTINEL_API_KEY}`);
   assert.equal(scrubbed.includes(SENTINEL_API_KEY), false);
+});
+
+/**
+ * Builds valid JSON text for a string nested `depth` array levels deep,
+ * without ever calling `JSON.stringify` on the nested structure itself —
+ * `JSON.stringify` has its own internal recursion limit (empirically,
+ * somewhere between 7,000 and 8,000 levels on this engine) well below
+ * depths `JSON.parse` can still successfully read back, so building the
+ * text this way lets tests exercise depths deeper than `JSON.stringify`
+ * could ever produce.
+ */
+function buildDeeplyNestedJsonArray(sentinel: string, depth: number): string {
+  return '['.repeat(depth) + JSON.stringify(sentinel) + ']'.repeat(depth);
+}
+
+test('adversarial: a string leaf nested far past the old 64-level walk cutoff is still registered', async () => {
+  const registry = createSecretRegistry();
+  const depth = 500; // comfortably > the old (removed) MAX_WALK_DEPTH of 64
+  const deepField = buildDeeplyNestedJsonArray(SENTINEL_DB_PASSWORD, depth);
+  const raw = `[{"name":"deep-app","pm_id":0,"pm2_env":{"status":"online","env":{}},"deepField":${deepField}}]`;
+
+  const result = await inspectPm2({ registry, runner: rawStdoutRunner(raw) });
+
+  assertOk(result);
+  assert.equal(JSON.stringify(result).includes(SENTINEL_DB_PASSWORD), false);
+  const scrubbed = registry.scrub(`buried secret: ${SENTINEL_DB_PASSWORD}`);
+  assert.equal(scrubbed.includes(SENTINEL_DB_PASSWORD), false);
+});
+
+test('adversarial: a string leaf nested tens of thousands of levels deep is registered without a stack overflow', async () => {
+  const registry = createSecretRegistry();
+  // Far beyond any plausible JS function-call recursion limit (a naive
+  // recursive walker throws "Maximum call stack size exceeded" long
+  // before this depth), but still well within maxJsonPayloadBytes and
+  // still something Node's native JSON.parse reads back successfully —
+  // exactly the gap the old recursive, depth-capped walker fell into.
+  const depth = 100_000;
+  const deepField = buildDeeplyNestedJsonArray(SENTINEL_JWT_SECRET, depth);
+  const raw = `[{"name":"very-deep-app","pm_id":0,"pm2_env":{"status":"online","env":{}},"deepField":${deepField}}]`;
+
+  const result = await inspectPm2({ registry, runner: rawStdoutRunner(raw) });
+
+  // Either acceptable outcome for a structural-depth extreme: the deepest
+  // sentinel was registered (and the run succeeded), or the whole
+  // inspection failed closed with a stable, non-sensitive error code. This
+  // implementation's iterative traversal has no depth ceiling, so it
+  // always takes the first branch here — asserted strictly, since a
+  // regression back to a silently-capped walk must fail this test.
+  assertOk(result);
+  assert.equal(JSON.stringify(result).includes(SENTINEL_JWT_SECRET), false);
+  const scrubbed = registry.scrub(`buried secret: ${SENTINEL_JWT_SECRET}`);
+  assert.equal(scrubbed.includes(SENTINEL_JWT_SECRET), false);
 });
 
 test('malformed top-level payload (not an array) fails fast with malformed_record', async () => {

@@ -20,7 +20,12 @@ export type CommandOutcome =
 export interface CommandRunOptions {
   /** Hard wall-clock limit for the child process. */
   readonly timeoutMs: number;
-  /** Hard limit on combined stdout/stderr buffering, in bytes. */
+  /**
+   * Hard limit on buffering, in bytes, passed straight through to
+   * `execFile`'s `maxBuffer` option. Node applies this limit to stdout and
+   * stderr *independently*, not as a combined bound — see
+   * `createExecFileCommandRunner` below for what that means in practice.
+   */
   readonly maxBufferBytes: number;
   /**
    * Optional environment for the child process. `undefined` means "inherit
@@ -50,6 +55,19 @@ export type CommandRunner = (
  * and `args` are passed as a fixed argv array to the OS, not concatenated
  * into a shell command string. There is no code path here that builds a
  * command string from untrusted input.
+ *
+ * `maxBuffer` caveat: Node enforces this limit on stdout and stderr
+ * *independently* — "largest amount of data in bytes allowed on stdout
+ * **or** stderr" (Node docs), not their sum. A hostile or malfunctioning
+ * `pm2` could in principle emit up to `maxBufferBytes` on stdout *and*
+ * up to `maxBufferBytes` on stderr before either stream's own limit
+ * triggers `'output-too-large'`. This function does not claim a combined
+ * bound. The adapter's actual enforcement of its intended payload-size
+ * limit is its own independent `Buffer.byteLength` check against stdout
+ * (`inspectPm2` in `src/adapters/pm2.ts`), which runs regardless of what
+ * this function's `maxBuffer` option did or didn't catch — `maxBuffer`
+ * here is a first line of defense against unbounded buffering while the
+ * child is still running, not the limit the adapter's contract rests on.
  */
 export function createExecFileCommandRunner(): CommandRunner {
   return (command, args, { timeoutMs, maxBufferBytes, env }) =>

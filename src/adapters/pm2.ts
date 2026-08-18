@@ -42,13 +42,19 @@ export type {
  *   validation is the only remaining reason it could still be redacted —
  *   there is no separate, confusing "passed the hard limit but still always
  *   gets redacted anyway" gap between the two.
- * - `maxValueLength` (8 KiB): comfortably above real secrets (JWTs,
+ * - `maxValueBytes` (8 KiB, measured with `Buffer.byteLength(value,
+ *   'utf8')` — deliberately not JavaScript's `string.length`, which counts
+ *   UTF-16 code units and can meaningfully undercount a multibyte-Unicode
+ *   value's real UTF-8 size): comfortably above real secrets (JWTs,
  *   passwords, API keys, even multi-line PEM keys) while bounding memory
  *   and fingerprinting cost per value.
- * - `maxJsonPayloadBytes` (8 MiB): the buffer limit passed to the child
- *   process (`maxBuffer`) and independently re-checked against the raw
- *   stdout string, so an injected test runner that bypasses `execFile`
- *   entirely is still bound by the same limit.
+ * - `maxJsonPayloadBytes` (8 MiB): independently re-checked by this
+ *   adapter against the raw stdout string (`Buffer.byteLength`), so an
+ *   injected test runner that bypasses `execFile` entirely is still bound
+ *   by the same limit. This is also passed as `execFile`'s `maxBuffer`
+ *   option, but that is a weaker, *per-stream* backstop, not a combined
+ *   one — see `core/command-runner.ts` for why this adapter's own check on
+ *   stdout is the real enforcement of this limit, not `maxBuffer` itself.
  * - `commandTimeoutMs` (5000): `pm2 jlist` talks to a local Unix-domain
  *   socket and returns near-instantly on a healthy daemon; 5s is generous
  *   slack, not a realistic expected latency.
@@ -57,7 +63,7 @@ export interface Pm2Limits {
   readonly maxProcesses: number;
   readonly maxEnvVarsPerProcess: number;
   readonly maxKeyLength: number;
-  readonly maxValueLength: number;
+  readonly maxValueBytes: number;
   readonly maxJsonPayloadBytes: number;
   readonly commandTimeoutMs: number;
 }
@@ -66,7 +72,7 @@ export const PM2_LIMITS: Pm2Limits = {
   maxProcesses: 200,
   maxEnvVarsPerProcess: 300,
   maxKeyLength: 120,
-  maxValueLength: 8192,
+  maxValueBytes: 8192,
   maxJsonPayloadBytes: 8 * 1024 * 1024,
   commandTimeoutMs: 5000,
 };
@@ -79,8 +85,6 @@ export const PM2_LIMITS: Pm2Limits = {
  * run.
  */
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const MAX_WALK_DEPTH = 64;
 
 export interface Pm2AdapterOptions {
   /** The run's single `SecretRegistry`. Every raw string leaf of the PM2 payload is registered into it before anything else happens. */
@@ -116,30 +120,47 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Recursively registers every string leaf of the parsed PM2 payload into
- * the run's `SecretRegistry`, before any normalization or reporting.
- * `pm2 jlist` may contain complete environment values and other sensitive
- * strings (paths, command lines) anywhere in its structure — this walk
- * makes no assumption about which fields are "the sensitive ones" and
- * treats the entire payload as sensitive, per docs/THREAT_MODEL.md.
+ * Registers every string leaf of the parsed PM2 payload into the run's
+ * `SecretRegistry`, before any normalization or reporting. `pm2 jlist` may
+ * contain complete environment values and other sensitive strings (paths,
+ * command lines) anywhere in its structure — this walk makes no assumption
+ * about which fields are "the sensitive ones" and treats the entire
+ * payload as sensitive, per docs/THREAT_MODEL.md.
+ *
+ * Iterative by design, using an explicit heap-allocated stack rather than
+ * JS function-call recursion: Node's native `JSON.parse` can successfully
+ * build structures far deeper than a handful of nested function calls
+ * could traverse before throwing "Maximum call stack size exceeded" — a
+ * naive recursive walker (or one with a depth cutoff that silently
+ * `return`s past some limit) can therefore leave a string leaf
+ * unregistered even though it was part of a *successfully parsed*
+ * payload. An array used as a stack has no such ceiling; traversal depth
+ * here is bounded only by available memory (and in practice by
+ * `maxJsonPayloadBytes`, since expressing depth *D* of nesting requires at
+ * least *2D* bytes of JSON text), never by the call stack. Every string
+ * leaf is registered, at any depth, or the process throws before this
+ * function returns — there is no code path that silently skips one.
  */
-function registerAllStringLeaves(value: unknown, registry: SecretRegistry, depth = 0): void {
-  if (depth > MAX_WALK_DEPTH) {
-    return;
-  }
-  if (typeof value === 'string') {
-    registry.register(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      registerAllStringLeaves(item, registry, depth + 1);
+function registerAllStringLeaves(root: unknown, registry: SecretRegistry): void {
+  const stack: unknown[] = [root];
+
+  while (stack.length > 0) {
+    const value = stack.pop();
+
+    if (typeof value === 'string') {
+      registry.register(value);
+      continue;
     }
-    return;
-  }
-  if (isPlainObject(value)) {
-    for (const item of Object.values(value)) {
-      registerAllStringLeaves(item, registry, depth + 1);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        stack.push(item);
+      }
+      continue;
+    }
+    if (isPlainObject(value)) {
+      for (const item of Object.values(value)) {
+        stack.push(item);
+      }
     }
   }
 }
@@ -217,13 +238,14 @@ function normalizeEnvironment(
     }
 
     const valueString = typeof rawValue === 'string' ? rawValue : safeStringifyEnvValue(rawValue);
+    const valueByteLength = Buffer.byteLength(valueString, 'utf8');
 
-    if (valueString.length > limits.maxValueLength) {
+    if (valueByteLength > limits.maxValueBytes) {
       return {
         ok: false,
         error: buildError(
           'value_too_long',
-          `process ${index} value length ${valueString.length}, limit ${limits.maxValueLength}`,
+          `process ${index} value length ${valueByteLength} bytes, limit ${limits.maxValueBytes} bytes`,
         ),
       };
     }
