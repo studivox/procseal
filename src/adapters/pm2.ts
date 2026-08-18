@@ -141,14 +141,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * leaf is registered, at any depth, or the process throws before this
  * function returns — there is no code path that silently skips one.
  */
-function registerAllStringLeaves(root: unknown, registry: SecretRegistry): void {
+function registerAllStringLeaves(
+  root: unknown,
+  registry: SecretRegistry,
+  excludeExactValue?: string,
+): void {
   const stack: unknown[] = [root];
 
   while (stack.length > 0) {
     const value = stack.pop();
 
     if (typeof value === 'string') {
-      registry.register(value);
+      if (value !== excludeExactValue) {
+        registry.register(value);
+      }
       continue;
     }
     if (Array.isArray(value)) {
@@ -162,6 +168,53 @@ function registerAllStringLeaves(root: unknown, registry: SecretRegistry): void 
         stack.push(item);
       }
     }
+  }
+}
+
+/**
+ * Registers every string leaf of a *known-to-be-an-array* `jlist` payload,
+ * the same way `registerAllStringLeaves` does — except for one narrow
+ * exception per record: its own process name is never registered,
+ * wherever it recurs within that record.
+ *
+ * This is not a weakening of "treat the entire payload as sensitive" — a
+ * process *name* is exactly the field this adapter already normalizes
+ * into `Pm2ProcessSnapshot.safeName` specifically so it CAN be displayed
+ * (see `buildSafeName`, and the audit command's `subject.process`, and
+ * `Finding` details throughout `src/rules/`, all of which are explicitly
+ * allowed to carry validated process names). If the raw name string were
+ * also registered as sensitive, `SecretRegistry.scrub` — which cannot
+ * distinguish "this exact string is a raw secret" from "this exact string
+ * is a name that was independently validated as safe to display" — would
+ * redact that intentionally-public field everywhere it appears in output,
+ * defeating the reason `safeName` exists at all.
+ *
+ * The exclusion is by *value*, not by field path: empirically, real PM2
+ * duplicates a process's name into at least three places
+ * (`record.name`, `pm2_env.name`, and `pm2_env.axm_options.module_name`),
+ * and there is no guarantee that list is exhaustive across PM2 versions or
+ * configurations (cluster mode, modules, ...). Comparing every string leaf
+ * against the one known-safe raw name for *this* record — rather than
+ * trying to enumerate every field PM2 might put it in — is robust to all
+ * of those without needing to track PM2's internal layout. Every other
+ * string value at any depth (`pm2_env.env` values, exec paths, monit
+ * data, anything else) is still registered exactly as
+ * `registerAllStringLeaves` would register it; only exact matches of the
+ * record's own name are skipped, and only within that record.
+ */
+function registerJlistPayloadExceptOwnName(
+  records: readonly unknown[],
+  registry: SecretRegistry,
+): void {
+  for (const record of records) {
+    if (!isPlainObject(record)) {
+      registerAllStringLeaves(record, registry);
+      continue;
+    }
+    const rawName = record['name'];
+    const excludeExactValue =
+      typeof rawName === 'string' && rawName.length > 0 ? rawName : undefined;
+    registerAllStringLeaves(record, registry, excludeExactValue);
   }
 }
 
@@ -320,14 +373,21 @@ export async function inspectPm2(options: Pm2AdapterOptions): Promise<Pm2Adapter
     return fail('invalid_json');
   }
 
-  // Every raw string leaf is registered before any normalization or
-  // reporting happens, even on a path that is about to fail — so a later
-  // diagnostic can never leak one of these values, even indirectly.
-  registerAllStringLeaves(parsed, registry);
-
   if (!Array.isArray(parsed)) {
+    // The payload's shape is unknown here — there is no "record" to
+    // reason about a name field within, so every string leaf is
+    // registered indiscriminately, exactly as `registerAllStringLeaves`
+    // always has.
+    registerAllStringLeaves(parsed, registry);
     return fail('malformed_record');
   }
+
+  // Every raw string leaf is registered before any normalization or
+  // reporting happens, even on a path that is about to fail — so a later
+  // diagnostic can never leak one of these values, even indirectly. Each
+  // record's own name (wherever PM2 duplicates it) is the one deliberate
+  // exception — see `registerJlistPayloadExceptOwnName`.
+  registerJlistPayloadExceptOwnName(parsed, registry);
 
   if (parsed.length > limits.maxProcesses) {
     return fail('too_many_processes', `${parsed.length} processes, limit ${limits.maxProcesses}`);

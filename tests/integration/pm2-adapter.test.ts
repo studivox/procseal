@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { inspectPm2 } from '../../src/adapters/pm2.js';
 import { createFingerprinter } from '../../src/core/fingerprint.js';
+import { sanitizeForDisplay } from '../../src/core/output-safety.js';
 import { createSecretRegistry } from '../../src/core/secret-registry.js';
 import {
   fixtureRunner,
@@ -389,6 +390,56 @@ test('non-object entries inside an otherwise-valid array are skipped, not fatal'
   assertOk(result);
   assert.equal(result.snapshot.processes.length, 1);
   assert.equal(result.snapshot.meta.skippedRecordCount, 3);
+});
+
+test('a safe process name is never redacted by the registry, however many places PM2 duplicates it into', async () => {
+  const registry = createSecretRegistry();
+  // Mirrors real `pm2 jlist` output (confirmed empirically against the
+  // pinned pm2 devDependency), which duplicates the process name into at
+  // least three places: `record.name`, `record.pm2_env.name`, and
+  // `record.pm2_env.axm_options.module_name`. The exclusion is by exact
+  // value, not by these specific field paths, so this also proves the fix
+  // isn't just covering the two paths that were found first.
+  const record = pm2JlistEntry({ name: 'billing-api', env: { API_KEY: SENTINEL_API_KEY } });
+  const pm2Env = record['pm2_env'] as Record<string, unknown>;
+  pm2Env['name'] = 'billing-api';
+  pm2Env['axm_options'] = { module_name: 'billing-api' };
+
+  const result = await inspectPm2({ registry, runner: stdoutRunner([record]) });
+  assertOk(result);
+  const safeName = result.snapshot.processes[0]!.safeName;
+  assert.equal(safeName, 'billing-api');
+
+  // The whole point of this test: sanitizeForDisplay (the same final
+  // safety net every reporter uses) must not redact the process name,
+  // even though it was present verbatim, multiple times, in the raw
+  // payload the adapter otherwise treats as sensitive.
+  assert.equal(sanitizeForDisplay(safeName, registry), 'billing-api');
+
+  // Meanwhile, an actual secret value is still fully scrubbed — this fix
+  // narrows what gets registered by exact value (the one record's own raw
+  // name), not the adapter's sensitive-payload treatment in general.
+  assert.equal(registry.scrub(`leaked=${SENTINEL_API_KEY}`).includes(SENTINEL_API_KEY), false);
+});
+
+test('a process name is only exempt from registration for the record it belongs to, never for a different process', async () => {
+  const registry = createSecretRegistry();
+  // app-a's exact name string also happens to appear, verbatim, as some
+  // *other* field's value inside app-b's record (contrived, but proves
+  // the boundary: excluding app-a's own name from app-a's record must not
+  // also exempt that exact same string value when it appears inside
+  // app-b's record for an unrelated reason).
+  const recordA = pm2JlistEntry({ name: 'app-a', pm_id: 0 });
+  const recordB = pm2JlistEntry({ name: 'app-b', pm_id: 1 });
+  (recordB['pm2_env'] as Record<string, unknown>)['pm_cwd'] = 'app-a';
+
+  const result = await inspectPm2({ registry, runner: stdoutRunner([recordA, recordB]) });
+  assertOk(result);
+
+  // "app-a" was registered from app-b's record (an exact-value match to a
+  // field that is not app-b's own name), so it is still scrubbed.
+  const scrubbed = registry.scrub('reference: app-a');
+  assert.equal(scrubbed.includes('app-a'), false);
 });
 
 test('a shared fingerprinter lets equals() compare an env value observed on one process against another', async () => {
