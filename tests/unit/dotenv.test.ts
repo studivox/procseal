@@ -131,6 +131,35 @@ test('reports a malformed line with no "=" as an invalid-line diagnostic', () =>
   assert.deepEqual(parsed.diagnostics, [{ line: 1, reason: 'invalid-line' }]);
 });
 
+// Unquoted-hash convention (documented in parsers/dotenv.ts): outside
+// quotes the first unescaped "#" always begins a comment, whether or not
+// it is preceded by whitespace. Inside either quote style "#" is always
+// literal.
+test('KEY=value#comment strips the comment even with no preceding whitespace', () => {
+  const parsed = parseDotenv('KEY=value#comment\n');
+  assert.equal(parsed.values.get('KEY'), 'value');
+});
+
+test('KEY=value # comment strips a whitespace-separated comment', () => {
+  const parsed = parseDotenv('KEY=value # comment\n');
+  assert.equal(parsed.values.get('KEY'), 'value');
+});
+
+test('KEY=#comment parses to an empty value', () => {
+  const parsed = parseDotenv('KEY=#comment\n');
+  assert.equal(parsed.values.get('KEY'), '');
+});
+
+test('KEY="value#literal" keeps the hash literal inside double quotes', () => {
+  const parsed = parseDotenv('KEY="value#literal"\n');
+  assert.equal(parsed.values.get('KEY'), 'value#literal');
+});
+
+test("KEY='value#literal' keeps the hash literal inside single quotes", () => {
+  const parsed = parseDotenv("KEY='value#literal'\n");
+  assert.equal(parsed.values.get('KEY'), 'value#literal');
+});
+
 test('a diagnostic never carries the raw attempted value', () => {
   const parsed = parseDotenv('SECRET="unterminated-sentinel-value-should-not-appear\n');
   for (const diagnostic of parsed.diagnostics) {

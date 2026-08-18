@@ -24,8 +24,16 @@ export function createSecretRegistry(): SecretRegistry {
       }
     },
     scrub(text: string): string {
+      // Longest-first, independent of registration order: if a shorter
+      // registered value happens to be a prefix or suffix of a longer one
+      // (e.g. "abc" and "abcdef"), scrubbing the shorter one first would
+      // consume only part of the longer secret and leave the remainder
+      // ("def") visible in the output. Sorting by length descending before
+      // each scrub means the longest match always wins, regardless of the
+      // order values were registered in.
+      const longestFirst = [...knownValues].sort((a, b) => b.length - a.length);
       let scrubbed = text;
-      for (const value of knownValues) {
+      for (const value of longestFirst) {
         scrubbed = scrubbed.split(value).join(redactedPlaceholder());
       }
       return scrubbed;

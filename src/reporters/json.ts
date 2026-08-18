@@ -1,9 +1,5 @@
 import { getRuleTitle, type AuditResult, type Finding } from '../core/types.js';
-import {
-  createSecretRegistry,
-  sanitizeForDisplay,
-  type SecretRegistry,
-} from '../core/output-safety.js';
+import { sanitizeForDisplay, type SecretRegistry } from '../core/output-safety.js';
 
 /**
  * Renders a stable, machine-readable JSON report. Every string-bearing
@@ -11,11 +7,11 @@ import {
  * placed in the payload — the same final safety net the terminal reporter
  * uses — so this reporter provides equivalent protection, not weaker
  * protection just because the output happens to be JSON.
+ *
+ * `registry` is required, not optional or defaulted — see the note on
+ * `renderTerminalReport` in `reporters/terminal.ts` for why.
  */
-export function renderJsonReport(
-  result: AuditResult,
-  registry: SecretRegistry = createSecretRegistry(),
-): string {
+export function renderJsonReport(result: AuditResult, registry: SecretRegistry): string {
   const payload = {
     status: sanitizeForDisplay(result.status, registry),
     message: sanitizeForDisplay(result.message, registry),

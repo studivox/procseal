@@ -23,18 +23,21 @@ test('renders a legitimate finding using the rule-catalog title and validated de
     details: { variable: 'JWT_SECRET', fingerprint: 'abc123' },
   });
   const result = baseResult({ findings: [finding] });
+  const registry = createSecretRegistry();
 
-  const terminal = renderTerminalReport(result);
+  const terminal = renderTerminalReport(result, registry);
   assert.match(terminal, /PS004/);
   assert.match(terminal, /reused across applications/);
   assert.match(terminal, /JWT_SECRET/);
 
-  const json = JSON.parse(renderJsonReport(result)) as { findings: Array<{ message: string }> };
+  const json = JSON.parse(renderJsonReport(result, registry)) as {
+    findings: Array<{ message: string }>;
+  };
   assert.match(json.findings[0]?.message ?? '', /reused across applications/);
 });
 
 test('reports "No findings." for the placeholder audit result', () => {
-  const terminal = renderTerminalReport(baseResult());
+  const terminal = renderTerminalReport(baseResult(), createSecretRegistry());
   assert.match(terminal, /No findings\./);
 });
 

@@ -4,6 +4,21 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AUDIT_HELP, executeAuditCommand } from './commands/audit.js';
 import { reportInternalError } from './core/internal-error.js';
+import { createSecretRegistry, sanitizeForDisplay } from './core/output-safety.js';
+
+/**
+ * A command-line argument is attacker-controlled input: it can contain
+ * newlines or ANSI escape sequences designed to forge extra terminal lines
+ * or manipulate the terminal when reflected back into an error message.
+ * Route any reflected argument through the same output-safety boundary the
+ * reporters use before it reaches stderr. No known secret values are
+ * relevant at this point in the CLI (no configuration has been read yet),
+ * so a fresh, empty registry is sufficient here — the character-set
+ * stripping is what matters for this boundary.
+ */
+function sanitizeReflectedArg(value: string): string {
+  return sanitizeForDisplay(value, createSecretRegistry());
+}
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +60,7 @@ function runAudit(rest: readonly string[], version: string): number {
   const allowedFlags = new Set(['--json']);
   const unknown = rest.find((arg) => !allowedFlags.has(arg));
   if (unknown !== undefined) {
-    process.stderr.write(`Unknown option for "audit": ${unknown}\n\n`);
+    process.stderr.write(`Unknown option for "audit": ${sanitizeReflectedArg(unknown)}\n\n`);
     process.stderr.write(AUDIT_HELP);
     return 2;
   }
@@ -74,7 +89,7 @@ function main(argv: readonly string[]): number {
     return runAudit(rest, version);
   }
 
-  process.stderr.write(`Unknown command: ${command}\n\n`);
+  process.stderr.write(`Unknown command: ${sanitizeReflectedArg(command)}\n\n`);
   process.stderr.write(TOP_LEVEL_HELP);
   return 2;
 }

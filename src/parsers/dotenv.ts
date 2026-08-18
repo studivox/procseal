@@ -21,7 +21,6 @@ export interface ParsedDotenv {
 
 const KEY_PATTERN = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
 const INLINE_COMMENT_AFTER_QUOTE_PATTERN = /^[ \t]+#/;
-const UNQUOTED_INLINE_COMMENT_PATTERN = /\s#/;
 
 /**
  * Parses dotenv-style text into a plain map using a small hand-written
@@ -29,6 +28,22 @@ const UNQUOTED_INLINE_COMMENT_PATTERN = /\s#/;
  * Never reads or writes `process.env` — callers decide what, if anything,
  * to do with the parsed values. Malformed lines produce a structured
  * diagnostic instead of a silently-wrong value.
+ *
+ * Hash (`#`) convention, documented explicitly because dotenv
+ * implementations disagree on this:
+ * - Inside a quoted value (single or double), `#` is always a literal
+ *   character. `KEY="value#literal"` and `KEY='value#literal'` both parse
+ *   to the value `value#literal`.
+ * - Outside quotes, the *first* unescaped `#` always begins a comment that
+ *   runs to the end of the line, whether or not it is preceded by
+ *   whitespace: `KEY=value#comment` and `KEY=value # comment` both parse
+ *   to the value `value`, and `KEY=#comment` parses to an empty value. A
+ *   value that must contain a literal `#` has to be quoted.
+ * - After a closed quote, a comment must be separated from the quote by
+ *   whitespace before the `#` (`KEY="value" # comment`); anything else
+ *   trailing a closed quote is treated as malformed input (see
+ *   `trailing-content-after-quote` below) rather than silently appended to
+ *   or dropped from the value.
  */
 export function parseDotenv(content: string): ParsedDotenv {
   const values = new Map<string, string>();
@@ -86,10 +101,9 @@ function parseValue(raw: string): ParseValueResult {
     return finishQuoted(leadingTrimmed, scanSingleQuoted(leadingTrimmed));
   }
 
-  const trimmed = leadingTrimmed.trim();
-  const commentMatch = UNQUOTED_INLINE_COMMENT_PATTERN.exec(trimmed);
-  const withoutComment = commentMatch ? trimmed.slice(0, commentMatch.index) : trimmed;
-  return { kind: 'ok', value: withoutComment.trim() };
+  const hashIndex = leadingTrimmed.indexOf('#');
+  const beforeComment = hashIndex === -1 ? leadingTrimmed : leadingTrimmed.slice(0, hashIndex);
+  return { kind: 'ok', value: beforeComment.trim() };
 }
 
 function finishQuoted(text: string, scanned: QuoteScanResult | null): ParseValueResult {

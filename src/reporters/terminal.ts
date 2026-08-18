@@ -1,9 +1,5 @@
 import { getRuleTitle, type AuditResult } from '../core/types.js';
-import {
-  createSecretRegistry,
-  sanitizeForDisplay,
-  type SecretRegistry,
-} from '../core/output-safety.js';
+import { sanitizeForDisplay, type SecretRegistry } from '../core/output-safety.js';
 
 /**
  * Renders a human-readable report. Every string-bearing field — including
@@ -11,13 +7,16 @@ import {
  * is passed through `sanitizeForDisplay` immediately before being written.
  * This is a deliberate final safety net: it does not assume upstream
  * validation happened, so a malformed or adversarial `AuditResult` cannot
- * leak a registered raw value through this reporter. Pass a `SecretRegistry`
- * pre-populated with known raw values to have them scrubbed on sight.
+ * leak a registered raw value through this reporter.
+ *
+ * `registry` is intentionally required, not optional or defaulted. A
+ * default would make the secret-scrubbing boundary something a caller can
+ * silently skip by omission; requiring it means a caller (e.g. a future
+ * PM2 adapter) must consciously supply the run's populated registry, and
+ * forgetting to do so is a compile-time error, not a silent, unprotected
+ * report.
  */
-export function renderTerminalReport(
-  result: AuditResult,
-  registry: SecretRegistry = createSecretRegistry(),
-): string {
+export function renderTerminalReport(result: AuditResult, registry: SecretRegistry): string {
   const lines: string[] = [];
 
   lines.push(`procseal ${sanitizeForDisplay(result.meta.version, registry)}`);

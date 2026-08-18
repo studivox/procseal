@@ -70,6 +70,35 @@ with the run's `SecretRegistry`; and that a thrown error containing a
 sentinel never reaches the CLI's stderr output, with or without that
 sentinel being known to any registry.
 
+A second, final hardening pass fixed four remaining gaps:
+
+- `SecretRegistry.scrub()` now sorts registered values longest-first before
+  replacing them, independent of registration order. Previously, if a
+  shorter value (e.g. `abc`) was registered before a longer, overlapping
+  one (e.g. `abcdef`), scrubbing the shorter value first could leave the
+  longer secret's remainder (`def`) visible in output.
+- `renderTerminalReport` and `renderJsonReport` no longer default their
+  `registry` parameter to a fresh, empty `SecretRegistry` — it is now a
+  required argument, so omitting it is a compile-time error rather than a
+  silently unprotected report. `commands/audit.ts` creates exactly one
+  run-scoped registry per invocation and threads it through result creation
+  (`runPlaceholderAudit`) and whichever reporter renders the output.
+- The CLI now routes reflected command-line arguments (an unrecognized
+  command or option, echoed back in a usage error) through the same
+  `sanitizeForDisplay` boundary the reporters use, so a hostile argument
+  containing a newline or ANSI escape sequence cannot forge extra terminal
+  lines or manipulate the terminal when reflected into stderr.
+- The dotenv parser's unquoted `#` handling is now documented and
+  consistent: outside quotes, the first unescaped `#` always begins a
+  comment (whitespace before it or not); inside either quote style, `#` is
+  always literal.
+
+Further adversarial tests were added: overlapping/prefix/suffix/repeated
+secret scrubbing in both registration orders; a compile-time check that
+reporters cannot be called without an explicit registry; hostile
+newline/ANSI command-line arguments; and the five documented dotenv hash
+cases.
+
 ### Notes
 
 - `procseal audit` does not yet inspect any real machine or PM2 process. It

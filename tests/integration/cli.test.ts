@@ -74,6 +74,57 @@ test('an unknown flag on audit exits with usage error code 2', () => {
   assert.match(stderr, /Unknown option/);
 });
 
+test('adversarial: a hostile unknown command with an embedded newline cannot forge a line in stderr', () => {
+  const hostile = 'evil\nFAKE-LOG: fabricated line';
+  const { status, stderr } = runCli([hostile]);
+  assert.equal(status, 2);
+  assert.equal(stderr.includes(hostile), false);
+  assert.equal(stderr.includes('\nFAKE-LOG: fabricated line'), false);
+  assert.match(stderr, /Unknown command:/);
+});
+
+test('adversarial: a hostile unknown command with ANSI escape sequences is neutralized in stderr', () => {
+  const hostile = '\x1b[31mFAKE-RED\x1b[0m\x07';
+  const { status, stderr } = runCli([hostile]);
+  assert.equal(status, 2);
+  assert.equal(stderr.includes('\x1b'), false);
+  assert.equal(stderr.includes('\x07'), false);
+});
+
+test('adversarial: a hostile unknown audit option with an embedded newline cannot forge a line in stderr', () => {
+  const hostile = '--evil\nFAKE-LOG: fabricated line';
+  const { status, stderr } = runCli(['audit', hostile]);
+  assert.equal(status, 2);
+  assert.equal(stderr.includes(hostile), false);
+  assert.equal(stderr.includes('\nFAKE-LOG: fabricated line'), false);
+  assert.match(stderr, /Unknown option for "audit":/);
+});
+
+test('adversarial: a hostile unknown audit option with ANSI escape sequences is neutralized in stderr', () => {
+  const hostile = '--\x1b[31mevil\x1b[0m';
+  const { status, stderr } = runCli(['audit', hostile]);
+  assert.equal(status, 2);
+  assert.equal(stderr.includes('\x1b'), false);
+});
+
+test('adversarial: a hostile argument crafted to look like a stack trace cannot forge real newline-separated lines', () => {
+  // sanitizeForDisplay neutralizes control characters (replacing them, not
+  // deleting surrounding text), so the reflected text may still contain
+  // this substring — the property under test is that it can never do so as
+  // a genuine separate terminal line, because no real newline reaches
+  // stderr. Confirmed here, and no Error object is ever constructed from
+  // (and no .message/.stack read from) a CLI argument in the first place.
+  const hostile = 'evil\nError: fake stack trace\n    at fabricated (file.js:1:1)';
+  const { status, stderr } = runCli([hostile]);
+  assert.equal(status, 2);
+  assert.equal(stderr.includes('\n    at fabricated (file.js:1:1)'), false);
+  const lines = stderr.split('\n');
+  assert.equal(
+    lines.some((line) => line.trim() === 'at fabricated (file.js:1:1)'),
+    false,
+  );
+});
+
 test('no CLI output ever contains a synthetic sentinel value', () => {
   const invocations: readonly (readonly string[])[] = [
     [],
