@@ -2,7 +2,7 @@
 
 > Detect configuration and secret drift in live processes without revealing secret values.
 
-**Status:** pre-alpha. The CLI foundation and a secure, read-only PM2 adapter (`src/adapters/pm2.ts`) are implemented and tested, but `procseal audit` still does not perform a real audit — the public CLI does not yet call the adapter, and `audit` still always reports an explicit `not_implemented` status with zero findings. The PM2 adapter is currently exercised only through its own test suite and internal APIs; it is not wired into the CLI yet, and no production data is uploaded anywhere. Comparing declared configuration against the live process state (PS001–PS008 detection) is deferred to the next milestone. The interface and rule IDs may still change.
+**Status:** pre-alpha. `procseal audit` now performs a real, read-only comparison between one explicitly selected PM2 process and one explicitly selected dotenv file — see [Try it now](#try-it-now) below. Four rules are implemented (PS001, PS002, PS003, PS005); PS004, PS006, PS007, and PS008 are defined as stable identifiers but not yet implemented. No production data is uploaded anywhere; ProcSeal never auto-discovers a process or a file to compare. The interface and rule IDs may still change.
 
 ## The problem
 
@@ -22,66 +22,91 @@ cd procseal
 npm ci
 npm run build
 node dist/cli.js --help
-node dist/cli.js audit
-node dist/cli.js audit --json
+node dist/cli.js audit --help
+node dist/cli.js audit --process my-app --env .env.production
+node dist/cli.js audit --process my-app --env .env.production --json
+node dist/cli.js audit --process my-app --env .env.production --check-unexpected
 ```
+
+`--process` and `--env` are both required — ProcSeal never auto-discovers a process or a file to compare. `--process` must match exactly one running PM2 process by name; `--check-unexpected` opts into reporting live variables that aren't declared in the dotenv file (PS003), which is otherwise silent.
 
 Once a first version is published, the intended entry point will be:
 
 ```bash
 # Future, once published — does not work yet.
-npx procseal audit
+npx procseal audit --process my-app --env .env.production
 ```
 
 ### Exit codes
 
-| Code | Meaning                                                                                                                            |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `0`  | The command completed. For `audit`, inspect the reported `status` field.                                                           |
-| `1`  | Internal error. A static message and a non-sensitive error code are printed; the original error message and stack are never shown. |
-| `2`  | Usage error — unknown command or invalid option.                                                                                   |
+| Code | Meaning                                                                                                                                                                                                                                     |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | The audit completed with zero findings.                                                                                                                                                                                                     |
+| `1`  | A safe operational or internal failure (e.g. the process or file couldn't be found/read). A static message and a non-sensitive error code are printed; raw file/process content, the original error message, and the stack are never shown. |
+| `2`  | Usage error — unknown command, or an invalid/missing option.                                                                                                                                                                                |
+| `3`  | The audit completed with one or more findings.                                                                                                                                                                                              |
+
+## Implemented rules
+
+`procseal audit --process <name> --env <path>` compares every variable declared in the dotenv file against that one live PM2 process's environment:
+
+| Rule    | Finding                                                                                          |
+| ------- | ------------------------------------------------------------------------------------------------ |
+| `PS001` | A declared value differs from the live value (any variable except `PORT` — see `PS005`).         |
+| `PS002` | A declared variable is missing from the live process.                                            |
+| `PS003` | A live variable isn't declared in the dotenv file. Only reported with `--check-unexpected`.      |
+| `PS005` | The declared and live `PORT` values differ. Reported instead of `PS001` for `PORT` specifically. |
+
+`PS004`, `PS006`, `PS007`, and `PS008` are defined as stable rule identifiers but have no detection logic yet — see [Planned](#planned-not-yet-implemented).
+
+No finding — for any rule — ever includes a raw declared or live value. A finding's `details` may only carry a validated variable name; `PS005` in particular never includes either side's actual port number, only the fact that `PORT` differs.
+
+Example output for a process with real drift:
+
+```text
+$ procseal audit --process my-app --env .env.production
+procseal 0.1.0-alpha.0
+status: completed
+process: my-app
+Audit completed. 3 finding(s).
+
+PS002  high      Declared variable is missing from the live process
+    variable: DATABASE_URL
+PS001  high      Declared and live values differ
+    variable: JWT_SECRET
+PS005  medium    Declared and live ports differ
+    variable: PORT
+
+3 finding(s)
+```
+
+(exit code `3` — see [Exit codes](#exit-codes) above)
 
 ## Implemented in this milestone
 
-- An executable `procseal` CLI: `--help`, `--version`, `audit`, `audit --help`, `audit --json`. `audit` is unchanged from the previous milestone — it still always reports `not_implemented` and performs no machine inspection; the PM2 adapter below is not wired into it yet.
-- Shared core types for findings, severities, and the eight stable rule identifiers (PS001–PS008).
-- Keyed HMAC-SHA-256 fingerprinting with a random, run-scoped, in-memory-only comparison key, with equality (`equals`) and display (`displayFingerprint`) kept as separate operations — see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
-- A dotenv-style parser that never mutates `process.env`, returning a structured diagnostic (never a raw value) for malformed input.
-- Terminal and JSON reporters that derive finding titles from the fixed rule catalog (never free-form text) and pass every string-bearing output field through a final sanitization boundary (`core/output-safety.ts`) before printing.
-- A static, code-only internal-error message at the CLI's top level: the original `Error.message` and stack are never printed, regardless of what a thrown error contains.
-- **A read-only PM2 process adapter (`src/adapters/pm2.ts`)**, exercised only through its own test suite and internal APIs so far — not yet reachable from the public CLI:
+- An executable `procseal` CLI: `--help`, `--version`, `audit --process <name> --env <path> [--json] [--check-unexpected]`, `audit --help`. Both `--process` and `--env` are required; ProcSeal never auto-discovers either.
+- A read-only dotenv-file adapter (`src/adapters/dotenv-file.ts`) that reads exactly the file passed to `--env` — regular files only (symlinks rejected race-free at `open()` via `O_NOFOLLOW`; non-regular files rejected via `fstat`), through a bounded read loop that allocates at most `maxFileBytes + 1` bytes regardless of how large or how fast the file grows, and per-file limits on variable count, key length, and value size (measured in UTF-8 bytes). A pre/post `fstat(fd, { bigint: true })` comparison (`dev`, `ino`, `size`, `mtimeNs`, `ctimeNs`) detects any same-inode mutation during the read and fails closed — descriptor-bound reading detects in-place changes, it does not prevent them. Every successfully parsed value — including one a later duplicate key goes on to overwrite — is registered in the run's `SecretRegistry` and wrapped in the same opaque `ObservedValue` the PM2 adapter uses, sharing one `Fingerprinter` per audit run so declared and live values compare through full-HMAC equality.
+- Conservative process-name selection (`src/core/process-selection.ts`): the requested `--process` value must match a strict identifier pattern and must match exactly one live PM2 process by name — zero or multiple matches both fail with their own stable error code, and a raw/unsafe PM2 process name is never compared against or exposed.
+- A pure rule engine (`src/rules/engine.ts`) implementing PS001, PS002, PS003, and PS005 (see [Implemented rules](#implemented-rules) above) — every comparison goes through `ObservedValue.equals()`, and every finding detail is a validated variable name, never a value.
+- **A read-only PM2 process adapter (`src/adapters/pm2.ts`)**, now wired into `procseal audit`:
   - Invokes exactly one fixed command, equivalent to `pm2 jlist`, via `node:child_process.execFile` with `shell: false` and a fixed argument array, with a command timeout and a buffer limit passed to `execFile`'s `maxBuffer` option (which Node applies to stdout and stderr independently, not as a combined bound) plus the adapter's own independent byte-length check on the received stdout, which is the limit's real enforcement. Never `exec`, never a shell command string, never `sudo`. See `src/core/command-runner.ts`.
-  - Inspects only the PM2 daemon belonging to the current OS user (whatever `PM2_HOME`/PM2 daemon the process's own environment resolves to); never reads or targets another user's `PM2_HOME`.
-  - Never restarts, reloads, stops, deletes, saves, kills, or updates a PM2 process — the adapter only ever runs `jlist`.
-  - Treats the entire raw `pm2 jlist` payload as sensitive: immediately after JSON parsing, every string leaf of the payload is recursively registered in the run's `SecretRegistry`, before any normalization happens.
-  - Represents every environment value as an opaque `ObservedValue` (`src/core/observed-value.ts`) — the raw string lives only in a true JavaScript private field, never returned by any getter, `toString`, `valueOf`, `toJSON`, or inspector. The only operations exposed are `equals()`, `equalsPlain()`, and `displayFingerprint()`, all delegating to the existing HMAC-based `Fingerprinter`.
-  - Returns a minimal, normalized snapshot (safe process id, redacted/validated process name, PM2 numeric id, a validated status enum, environment variable names, and opaque values) — never the raw `pm2_env`, full command lines, raw paths, or raw stdout/stderr.
-  - Enforces documented hard limits (max processes, max env vars per process, max key length, max value size in UTF-8 bytes via `Buffer.byteLength` — not JavaScript's `.length` — max JSON payload size, command timeout) and fails fast with a stable, non-sensitive error code rather than silently truncating a value and comparing the truncated version — see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
-  - Supports dependency injection of the command runner, so its unit and integration tests never require a real PM2 daemon.
-  - Registers every string leaf of the parsed payload through an iterative (non-recursive) traversal, so no leaf is ever silently skipped past some depth, and no payload depth can exhaust the call stack.
-- A real, isolated end-to-end test (`tests/e2e/pm2-live.test.ts`) that starts an actual PM2 daemon under a unique temporary `PM2_HOME` (via `mkdtemp`), starts a tiny synthetic process with a synthetic sentinel environment value, reads it back through the adapter, and proves the sentinel never appears in any output or serialization — then tears the isolated daemon down through a guard (`tests/e2e/pm2-isolation-guard.ts`) that refuses to run any cleanup command unless `PM2_HOME` is present, non-empty, not the real `PM2_HOME`, and inside the test's own temporary directory. `pm2 kill` runs, but the temporary directory is only ever deleted afterward if the isolated daemon's pidfile (read before kill) was either genuinely absent, or held a valid PID now confirmed dead via a safe signal-`0` existence probe — a failed kill, a still-alive daemon, **or a pidfile that exists but can't be safely verified** (malformed, oversized, non-regular, unreadable) all leave the directory in place instead of being treated as a completed teardown. The real PM2 daemon and `PM2_HOME` used by this machine are never read or touched by this test suite.
-- No telemetry, no analytics, no network calls, no update checks, no postinstall scripts. PM2 is a pinned `devDependency` used only by the isolated end-to-end test — it is never a runtime dependency of the published package (see `npm pack --dry-run`; PM2, tests, and fixtures are not part of the published tarball).
+  - Inspects only the PM2 daemon belonging to the current OS user; never reads or targets another user's `PM2_HOME`. Never restarts, reloads, stops, deletes, saves, kills, or updates a PM2 process — the adapter only ever runs `jlist`.
+  - Treats the entire raw `pm2 jlist` payload as sensitive: every string leaf is registered in the run's `SecretRegistry`, except a process's own name (PM2 duplicates it into multiple fields; a validated process name is meant to be displayable — see `subject.process` in JSON output — so it is excluded from registration by exact value, never by field path, so the exclusion holds regardless of how many places PM2 puts it).
+  - Represents every environment value as an opaque `ObservedValue` (`src/core/observed-value.ts`) — the raw string lives only in a true JavaScript private field, never returned by any getter, `toString`, `valueOf`, `toJSON`, or inspector.
+  - Returns a minimal, normalized snapshot — never the raw `pm2_env`, full command lines, raw paths, or raw stdout/stderr — enforcing documented hard limits and failing fast with a stable, non-sensitive error code rather than silently truncating a value and comparing the truncated version. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- Terminal and JSON reporters that derive finding titles from the fixed rule catalog (never free-form text), report the audited process identity and finding count, and pass every string-bearing output field through a final sanitization boundary (`core/output-safety.ts`) before printing.
+- A static, code-only internal-error message at the CLI's top level for genuinely unexpected failures: the original `Error.message` and stack are never printed. Expected operational failures (process not found, file unreadable, PM2 unavailable, ...) instead produce a structured `status: "failed"` result with a stable error code and a fixed, static message — never raw file or process content.
+- Real, isolated end-to-end tests (`tests/e2e/pm2-live.test.ts`, `tests/e2e/audit-live.test.ts`) that start an actual PM2 daemon under a unique temporary `PM2_HOME`, run the real CLI against it and a real temporary dotenv file, and prove exit codes `0`/`3` and zero sentinel leakage — then tear the isolated daemon down through a guard (`tests/e2e/pm2-isolation-guard.ts`) that only deletes the temporary directory after a confirmed-complete teardown (`pm2 kill` succeeded **and** the daemon's PID is confirmed dead, or its pidfile was genuinely absent) — a failed kill, a still-alive daemon, or an unverifiable pidfile all leave the directory in place. The real PM2 daemon and `PM2_HOME` used by this machine are never read or touched by this test suite.
+- No telemetry, no analytics, no network calls, no update checks, no postinstall scripts. PM2 is a pinned `devDependency` used only by the isolated end-to-end tests — it is never a runtime dependency of the published package (see `npm pack --dry-run`; PM2, tests, and fixtures are not part of the published tarball).
 
 ## Planned (not yet implemented)
 
-- Wiring the PM2 adapter into the public `procseal audit` command (it currently reports `not_implemented` regardless of the adapter's existence)
-- Comparing declared configuration with `.env`, `.env.production`, and ecosystem files against live process state
-- Detecting missing, unexpected, and stale variables
-- Detecting secret reuse across apps using the fingerprinting described above
-- Detecting port drift and PM2 dump/live-process drift
-- Flagging risky deployment commands such as broad `pm2 restart all`
-- Rule detection for PS001–PS008 (the identifiers exist; none of the checks run yet)
+- `PS004`: sensitive value reused across applications
+- `PS006`: a deployment command is a dangerous, broad PM2 operation
+- `PS007`: a configuration file appears to expose a plaintext secret
+- `PS008`: saved PM2 dump state differs from the live process set
+- Comparing against ecosystem files, `.env.production`-style auto-discovery, or more than one process/file per run — every audit remains exactly one explicit `--process` and one explicit `--env`
 - Automatic remediation is a **non-goal**; see [docs/ROADMAP.md](docs/ROADMAP.md)
-
-Example of the _planned_ output once the PM2 adapter ships (not produced yet):
-
-```text
-PS001  high    DATABASE_URL differs between file and live process
-PS004  high    JWT secret fingerprint is reused by 2 applications
-PS005  medium  Declared port 3000, live process port 3100
-
-3 findings · 0 secret values exposed
-```
 
 ## Security principles
 

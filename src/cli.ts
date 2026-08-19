@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AUDIT_HELP, executeAuditCommand } from './commands/audit.js';
+import { AUDIT_HELP, executeAuditCommand, parseAuditArgs } from './commands/audit.js';
 import { reportInternalError } from './core/internal-error.js';
 import { createSecretRegistry, sanitizeForDisplay } from './core/output-safety.js';
 
@@ -26,18 +26,21 @@ const TOP_LEVEL_HELP = `procseal — local-first configuration and secret drift 
 
 Usage:
   procseal [--help] [--version]
-  procseal audit [--json] [--help]
+  procseal audit --process <pm2-process-name> --env <path> [--json] [--check-unexpected]
 
 Status:
-  pre-alpha. The PM2 live-process adapter is not implemented yet.
-  "procseal audit" currently reports a "not_implemented" status and performs
-  no machine inspection.
+  pre-alpha. "procseal audit" performs a real, read-only comparison between
+  one explicitly selected PM2 process and one explicitly selected dotenv
+  file. Run "procseal audit --help" for the full option and exit-code
+  reference.
 
 Exit codes:
-  0  The command completed. For "audit", inspect the reported status field.
-  1  Internal error. A static message and a non-sensitive error code are
-     printed; the original error message and stack are never shown.
-  2  Usage error (unknown command or invalid option).
+  0  The audit completed with zero findings.
+  1  A safe operational or internal failure. A static message and a
+     non-sensitive error code are printed; raw file/process content, the
+     original error message, and the stack are never shown.
+  2  Usage error (unknown command or invalid/missing option).
+  3  The audit completed with one or more findings.
 
 Security:
   procseal makes no network calls, performs no telemetry, and never prints
@@ -51,27 +54,32 @@ function readVersion(): string {
   return parsed.version ?? '0.0.0';
 }
 
-function runAudit(rest: readonly string[], version: string): number {
-  if (rest.includes('--help') || rest.includes('-h')) {
+async function runAudit(rest: readonly string[], version: string): Promise<number> {
+  const parsed = parseAuditArgs(rest);
+
+  if (parsed.kind === 'help') {
     process.stdout.write(AUDIT_HELP);
     return 0;
   }
 
-  const allowedFlags = new Set(['--json']);
-  const unknown = rest.find((arg) => !allowedFlags.has(arg));
-  if (unknown !== undefined) {
-    process.stderr.write(`Unknown option for "audit": ${sanitizeReflectedArg(unknown)}\n\n`);
+  if (parsed.kind === 'usage-error') {
+    if (parsed.offendingArg !== undefined) {
+      process.stderr.write(
+        `Unknown option for "audit": ${sanitizeReflectedArg(parsed.offendingArg)}\n\n`,
+      );
+    } else {
+      process.stderr.write(`${parsed.reason}\n\n`);
+    }
     process.stderr.write(AUDIT_HELP);
     return 2;
   }
 
-  const json = rest.includes('--json');
-  const { output, exitCode } = executeAuditCommand({ json }, version);
+  const { output, exitCode } = await executeAuditCommand(parsed.options, version);
   process.stdout.write(`${output}\n`);
   return exitCode;
 }
 
-function main(argv: readonly string[]): number {
+async function main(argv: readonly string[]): Promise<number> {
   const version = readVersion();
   const [command, ...rest] = argv;
 
@@ -94,10 +102,12 @@ function main(argv: readonly string[]): number {
   return 2;
 }
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (error) {
-  const { message, exitCode } = reportInternalError(error);
-  process.stderr.write(message);
-  process.exitCode = exitCode;
-}
+main(process.argv.slice(2))
+  .then((exitCode) => {
+    process.exitCode = exitCode;
+  })
+  .catch((error: unknown) => {
+    const { message, exitCode } = reportInternalError(error);
+    process.stderr.write(message);
+    process.exitCode = exitCode;
+  });

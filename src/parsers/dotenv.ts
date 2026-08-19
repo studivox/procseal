@@ -13,10 +13,41 @@ export interface DotenvDiagnostic {
   readonly reason: DotenvDiagnosticReason;
 }
 
+/**
+ * One successfully-parsed `key=value` assignment, in file order. Never
+ * produced for a line that failed to parse — those only ever produce a
+ * `DotenvDiagnostic` (line, reason, and optionally the key it was able to
+ * extract before failing), which never carries the raw attempted value or
+ * any other raw source text. That boundary is exact: a value only exists
+ * in `ParsedDotenv` at all if parsing that line succeeded.
+ */
+export interface DotenvAssignment {
+  readonly line: number;
+  readonly key: string;
+  readonly value: string;
+}
+
 export interface ParsedDotenv {
+  /**
+   * The last value declared for each key — dotenv's own "last write wins"
+   * semantics. When a key is declared more than once, every value before
+   * the last one is *not* represented here; see `assignments` below for
+   * the complete, order-preserving record of every successful parse.
+   */
   readonly values: ReadonlyMap<string, string>;
   readonly duplicateKeys: readonly string[];
   readonly diagnostics: readonly DotenvDiagnostic[];
+  /**
+   * Every successfully-parsed assignment, in file order, including ones
+   * later overwritten by a duplicate key. `values` only keeps the final
+   * occurrence per key; a caller that must treat every declared
+   * occurrence as sensitive (not only the one that "wins") should
+   * register every value in this list, not only `values`' — an earlier,
+   * overwritten duplicate value is still a raw value that appeared in the
+   * file and must not be assumed safe just because a later line replaced
+   * it.
+   */
+  readonly assignments: readonly DotenvAssignment[];
 }
 
 const KEY_PATTERN = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
@@ -49,6 +80,7 @@ export function parseDotenv(content: string): ParsedDotenv {
   const values = new Map<string, string>();
   const duplicateKeys = new Set<string>();
   const diagnostics: DotenvDiagnostic[] = [];
+  const assignments: DotenvAssignment[] = [];
 
   const lines = content.split(/\r\n|\n|\r/);
 
@@ -76,13 +108,15 @@ export function parseDotenv(content: string): ParsedDotenv {
       continue;
     }
 
+    assignments.push({ line: lineNumber, key, value: result.value });
+
     if (values.has(key)) {
       duplicateKeys.add(key);
     }
     values.set(key, result.value);
   }
 
-  return { values, duplicateKeys: [...duplicateKeys], diagnostics };
+  return { values, duplicateKeys: [...duplicateKeys], diagnostics, assignments };
 }
 
 type ParseValueResult =

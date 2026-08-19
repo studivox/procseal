@@ -1,5 +1,6 @@
-import { getRuleTitle, type AuditResult } from '../core/types.js';
+import type { AuditResult } from '../core/audit-types.js';
 import { sanitizeForDisplay, type SecretRegistry } from '../core/output-safety.js';
+import { getRuleTitle } from '../core/types.js';
 
 /**
  * Renders a human-readable report. Every string-bearing field — including
@@ -21,6 +22,12 @@ export function renderTerminalReport(result: AuditResult, registry: SecretRegist
 
   lines.push(`procseal ${sanitizeForDisplay(result.meta.version, registry)}`);
   lines.push(`status: ${sanitizeForDisplay(result.status, registry)}`);
+  if (result.code !== undefined) {
+    lines.push(`code: ${sanitizeForDisplay(result.code, registry)}`);
+  }
+  if (result.subject !== undefined) {
+    lines.push(`process: ${sanitizeForDisplay(result.subject.process, registry)}`);
+  }
   lines.push(sanitizeForDisplay(result.message, registry));
   lines.push('');
 

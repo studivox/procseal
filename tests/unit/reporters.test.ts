@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { AuditResult } from '../../src/core/audit-types.js';
 import { createSecretRegistry } from '../../src/core/output-safety.js';
-import { createFinding, type AuditResult, type Finding } from '../../src/core/types.js';
+import { createFinding, type Finding } from '../../src/core/types.js';
 import { renderJsonReport } from '../../src/reporters/json.js';
 import { renderTerminalReport } from '../../src/reporters/terminal.js';
 import { SENTINEL_DB_PASSWORD, SENTINEL_JWT_SECRET } from '../fixtures/sentinel-values.js';
 
 function baseResult(overrides: Partial<AuditResult> = {}): AuditResult {
   return {
-    status: 'not_implemented',
+    status: 'completed',
     message: 'placeholder result for reporter testing',
     findings: [],
     meta: { tool: 'procseal', version: '0.0.0-test', generatedAt: new Date().toISOString() },
@@ -36,7 +37,7 @@ test('renders a legitimate finding using the rule-catalog title and validated de
   assert.match(json.findings[0]?.message ?? '', /reused across applications/);
 });
 
-test('reports "No findings." for the placeholder audit result', () => {
+test('reports "No findings." for a completed audit result with an empty findings list', () => {
   const terminal = renderTerminalReport(baseResult(), createSecretRegistry());
   assert.match(terminal, /No findings\./);
 });

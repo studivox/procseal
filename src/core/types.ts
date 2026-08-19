@@ -86,22 +86,3 @@ export function createFinding(input: {
 
   return { ruleId: input.ruleId, severity: input.severity, details };
 }
-
-/**
- * This milestone only ever produces `not_implemented`: the PM2 adapter does
- * not exist yet, so `audit` must not claim to have inspected anything real.
- */
-export type AuditStatus = 'not_implemented';
-
-export interface AuditMeta {
-  readonly tool: 'procseal';
-  readonly version: string;
-  readonly generatedAt: string;
-}
-
-export interface AuditResult {
-  readonly status: AuditStatus;
-  readonly message: string;
-  readonly findings: readonly Finding[];
-  readonly meta: AuditMeta;
-}

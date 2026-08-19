@@ -6,10 +6,11 @@ not, and how its fingerprinting and output-redaction designs work.
 
 ## What ProcSeal is
 
-A read-only, local-first CLI that compares declared configuration (files on
-disk) with live process state (eventually, PM2) and reports drift — missing
-variables, changed values, reused secrets, port mismatches, risky deploy
-commands — without ever printing the underlying secret values.
+A read-only, local-first CLI that compares declared configuration (one
+explicitly selected dotenv file) with live process state (one explicitly
+selected PM2 process) and reports drift — missing variables, changed
+values, port mismatches — without ever printing the underlying secret
+values.
 
 ## What ProcSeal is not
 
@@ -19,14 +20,16 @@ commands — without ever printing the underlying secret values.
 - Not a network service. ProcSeal makes no network calls, performs no
   telemetry, and uploads no configuration or process data anywhere. Every
   operation is local to the machine it runs on. This remains true with the
-  PM2 adapter in place: it only ever spawns a local `pm2 jlist` process and
-  returns data in-process — no network calls of any kind.
-- Not (yet) reachable from `procseal audit`. A read-only PM2 adapter now
-  exists (`src/adapters/pm2.ts`, see "The PM2 adapter" below) and has its
-  own test suite, but the public CLI does not call it yet. `procseal audit`
-  still always reports an explicit `not_implemented` status and performs no
-  machine inspection. Comparing the adapter's snapshot against declared
-  configuration (PS001–PS008 detection) is the next milestone.
+  PM2 adapter and the dotenv-file adapter both wired into `audit`: the
+  former only ever spawns a local `pm2 jlist` process, and the latter only
+  ever reads the one local file path it was given — no network calls of
+  any kind.
+- Not an auto-discovery tool. `procseal audit` never guesses which process
+  or file to compare; `--process` and `--env` are both required, and
+  exactly one process and one file are compared per run.
+- Not (yet) a comparison against anything beyond one process and one file.
+  Ecosystem files, PM2 dump state, and multi-process/multi-file audits are
+  not implemented — see "Out of scope for this milestone" below.
 
 ## Redaction contract
 
@@ -66,14 +69,15 @@ commands — without ever printing the underlying secret values.
    finding's `ruleId`, `severity`, derived title, and `details` entries —
    not only the fields that seemed likely to carry user data.
 
-5. `SecretRegistry` only catches values it has been told about. In
-   `procseal audit` (the public CLI command) nothing is registered in
-   production yet, because `audit` is still a placeholder that never
-   observes a real configuration value. The PM2 adapter (see "The PM2
-   adapter" below) does register every raw value it reads — before any
-   normalization or reporting — but it is not called from `audit` yet, so
-   this has no production effect until it is wired in. Tests populate a
-   registry manually, or via the adapter, to prove the scrub behavior.
+5. `SecretRegistry` only catches values it has been told about. The
+   `audit` command creates exactly one run-scoped registry per invocation
+   (`executeAuditCommand` in `commands/audit.ts`) and threads it through
+   both adapters: the dotenv-file adapter registers every declared value
+   it reads, and the PM2 adapter registers every raw string in the
+   `pm2 jlist` payload (with one deliberate, narrow exception — see "The
+   PM2 adapter" below) — both before any normalization or reporting
+   happens. The same registry is then threaded through whichever reporter
+   renders the final output.
 6. Uncaught errors at the CLI's top level never print the original
    `Error.message` or stack (`core/internal-error.ts`). This is a stronger
    guarantee than substring redaction: redaction can only remove _known_
@@ -210,6 +214,31 @@ public CLI yet — see "What ProcSeal is not" above.
   before any normalization or reporting happens, and even on a path that
   is about to fail with an error. This is defense in depth beyond the
   fields the normalized snapshot actually surfaces.
+  - One narrow, deliberate exception: each record's own process name is
+    excluded from registration, by exact value, wherever it recurs within
+    that record. Real `pm2 jlist` output duplicates a process's name into
+    multiple fields (`name`, `pm2_env.name`, and
+    `pm2_env.axm_options.module_name` have all been observed against the
+    pinned `pm2` devDependency) — and a process name is exactly the field
+    this adapter normalizes into `Pm2ProcessSnapshot.safeName`
+    specifically so it can be displayed (the audit command's
+    `subject.process` in particular; see "The rule engine and audit
+    orchestration" below). `SecretRegistry.scrub` cannot distinguish "this
+    exact string is a raw secret" from "this exact string is a name that
+    was independently validated as safe to display," so registering it
+    would redact that intentionally-public field everywhere it appears in
+    output — including, once observed in practice, corrupting unrelated
+    output that merely happened to contain the same digits or substrings
+    as some other short registered value, which is why the exclusion is by
+    exact value rather than by field path: there is no guarantee PM2's
+    internal duplicate-name locations are limited to the three found so
+    far, across versions and configurations (cluster mode, modules, ...).
+    The exclusion is scoped per-record — process A's name is never
+    exempted while walking process B's record — and every other field at
+    any depth (`pm2_env.env` values, exec paths, monit data, anything
+    else) is still registered exactly as before. Regression tests
+    (`tests/integration/pm2-adapter.test.ts`) cover both the multi-location
+    duplication and the per-record scoping boundary.
 - Every environment value is wrapped in an opaque `ObservedValue`
   (`core/observed-value.ts`) rather than an ordinary string:
   - The raw value lives only in a true JavaScript private field (`#raw`),
@@ -308,15 +337,176 @@ public CLI yet — see "What ProcSeal is not" above.
   package. `npm pack --dry-run` confirms the published tarball contains no
   `pm2`, no tests, no fixtures, and no `node_modules`.
 
+## The rule engine and audit orchestration
+
+`procseal audit --process <name> --env <path>` is the first command that
+actually performs a comparison. This section covers everything specific to
+that: the dotenv-file adapter, process selection, the rule engine, and the
+shape of the result the reporters render.
+
+### The dotenv-file adapter
+
+`src/adapters/dotenv-file.ts` reads exactly the file passed to `--env` —
+never any other path, never an ecosystem file, never auto-discovered.
+
+- Opens with `O_NOFOLLOW` and, from that point on, only ever operates on
+  the resulting file descriptor — never a second path-based lookup. This
+  gives two distinct properties, and they are not the same guarantee:
+  - A symlink at the given path is rejected by the OS at `open()` time
+    (`ELOOP`), **race-free** — there is no window between "check if it's
+    a symlink" and "open it" for a symlink to be swapped in.
+  - Every subsequent operation (`fstat`, read) targets the exact inode
+    that was opened, so a _rename-based swap at the same path_ (unlinking
+    `path` and putting a different file there) cannot affect an
+    already-open descriptor. This is **descriptor-bound reading, not a
+    guarantee that the file's content is unchanged while being read** —
+    the same inode can still be modified in place (appended to,
+    truncated, or rewritten) by another process for as long as the
+    descriptor is held open. Nothing about `O_NOFOLLOW` prevents that; see
+    the mutation-detection bullet below for what actually catches it.
+- Rejects non-regular files (checked via `fstat().isFile()` after the
+  `O_NOFOLLOW` open).
+- Reads through a **bounded loop** (`readBounded`), not `readFileSync`:
+  a single buffer is allocated once, at exactly `maxFileBytes + 1` bytes,
+  and the loop reads into it in fixed-size chunks (64 KiB by default) via
+  `readSync` on the open descriptor. However large the underlying file is
+  — or grows to be while the loop is running — more than
+  `maxFileBytes + 1` bytes can never be buffered; the loop fails with
+  `env_file_too_large` the moment that would happen, rather than
+  continuing to read further. A pre-read `fstat` size check still rejects
+  a file that is already too large before any read is attempted, as a
+  fast path; the bounded loop is what actually enforces the limit,
+  including against a file that grows _during_ the read. Short reads
+  (a `readSync` call returning fewer bytes than requested, without error)
+  and `EINTR`/`EAGAIN` are both handled without losing or re-reading any
+  bytes.
+- **Same-inode mutation detection**: an `fstat(fd, { bigint: true })`
+  snapshot (`dev`, `ino`, `size`, `mtimeNs`, `ctimeNs`) is captured
+  immediately before the bounded read loop starts and again immediately
+  after it finishes. If any of those five fields differ, the read fails
+  closed with `env_file_changed_during_read` — the content that was read
+  is discarded, never parsed, never registered. `mtimeNs`/`ctimeNs` (not
+  the coarser, second-resolution `mtime`/`ctime`) are what catch a
+  same-size in-place rewrite that a size-only comparison would miss
+  entirely. This detects the mutation after the fact; it does not, and
+  cannot, prevent another process from writing to the file while this
+  adapter holds it open — see the note on descriptor-bound reading above.
+- Hard limits on variable count (500), key length (120 characters), and
+  value size (8 KiB, measured with `Buffer.byteLength(value, 'utf8')`, not
+  JavaScript's `.length` — the same multibyte-Unicode reasoning documented
+  for the PM2 adapter's `maxValueBytes`). Every limit fails the whole read
+  fast; none of them truncates and continues.
+- Malformed content (any `parsers/dotenv.ts` diagnostic — an invalid line,
+  an unterminated quote, trailing content after a closed quote) and
+  duplicate keys both fail the whole read, with their own stable error
+  codes. A malformed fragment was never successfully parsed, so it is
+  never registered and its `DotenvDiagnostic` never carries any raw source
+  text — only a line number, a reason, and (when recoverable) the key.
+- Every **successfully parsed** value is registered in the run's
+  `SecretRegistry` immediately after parsing — before diagnostics,
+  duplicates, or limits are even checked — the same ordering guarantee the
+  PM2 adapter makes. This is every occurrence, not only the one
+  `parsed.values` keeps: `parsers/dotenv.ts`'s `ParsedDotenv.assignments`
+  records every successful `key=value` parse in file order, including a
+  value a later duplicate key goes on to overwrite, and the adapter
+  registers every one of them — an earlier, overwritten value is still a
+  raw value that appeared in the file and must not be assumed safe just
+  because a later line replaced it. Only values are registered, never
+  keys: dotenv keys are already restricted to
+  `[A-Za-z_][A-Za-z0-9_]*` by the parser's own key pattern, so they cannot
+  be secrets by construction, unlike the PM2 adapter's payload, whose shape
+  is not known ahead of time.
+- Each declared value is wrapped in the same opaque `ObservedValue` type
+  the PM2 adapter uses, constructed with a `Fingerprinter` shared across
+  both adapters for one audit run (created once in
+  `runAuditPipeline`) — so a declared value and a live value are always
+  compared through the same run-scoped HMAC key, and `ObservedValue.equals()`
+  is the only comparison primitive either side ever goes through.
+- Tests exercise the bounded-read and mutation-detection paths
+  deterministically, through an injected instrumentation seam
+  (`onChunkReadForTesting`/`readChunkBytesForTesting` in
+  `ReadDotenvFileOptions`) that lets a test synchronously mutate the file
+  between chunk reads — no real concurrency, no timing-dependent
+  background process, no flakiness. See
+  `tests/unit/dotenv-file.test.ts` for a growing file that cannot exceed
+  the buffer bound, and append/truncate/same-size-rewrite mutations that
+  all fail closed.
+
+### Process selection
+
+`src/core/process-selection.ts` validates the requested `--process` value
+against a conservative pattern (letters, digits, underscore, dot, dash;
+120 characters max) _before_ the PM2 adapter is ever called — an invalid
+name fails immediately, without touching PM2 at all. A valid name must
+then match exactly one process in the live snapshot, compared only against
+each process's already-safe `safeName` — zero matches and more than one
+match both fail, with their own stable error codes
+(`process_not_found`, `process_ambiguous`), and a raw/unsafe PM2 process
+name is never compared against or exposed.
+
+### The rule engine
+
+`src/rules/engine.ts` is a pure function: given one declared snapshot, one
+live process snapshot, and whether `--check-unexpected` was passed, it
+returns findings for exactly the rules implemented in this milestone —
+PS001, PS002, PS003, and PS005 (see the project `README.md` for what each
+one reports). It makes no I/O calls, mutates neither input, and never
+touches a raw value directly — every comparison goes through
+`ObservedValue.equals()`, and every finding's `details` carries only a
+validated variable name (via the existing `createFinding`/`SafeLabel`
+machinery — see the Redaction contract above), never a value. PS005 in
+particular carries only the literal string `PORT`, never either side's
+actual port number.
+
+PS003 (an unexpected live variable) is gated entirely on the
+`--check-unexpected` flag: with it omitted, the rule engine simply never
+evaluates that comparison, not merely "runs it and hides the result" — so
+there is no code path where an unexpected-variable finding could leak
+through some other channel while the flag is off.
+
+### The audit result and orchestration order
+
+`runAuditPipeline` (`commands/audit.ts`) runs the steps in a fixed order,
+each of which can stop the whole run with its own stable `AuditErrorCode`:
+validate the process name syntax, read the dotenv file, inspect PM2, select
+the one matching process, evaluate the rules. This order is deliberate,
+not incidental: an invalid process name or a broken dotenv file is caught
+_before_ `inspectPm2` is ever called, so those failure modes never touch
+PM2 at all (see `tests/integration/cli.test.ts`, which relies on exactly
+this to test PM2-unreachable failure modes without a real daemon).
+
+The result (`AuditResult` in `core/audit-types.ts`) has two possible
+`status` values:
+
+- `'completed'` — the comparison actually ran. `findings` may be empty (a
+  clean audit, exit code `0`) or not (exit code `3`). `subject.process`
+  carries the audited process's safe name.
+- `'failed'` — an expected, well-defined operational condition stopped the
+  run before any comparison happened (exit code `1`). `code` is always
+  present (one of `ProcessSelectionErrorCode`, `DotenvFileErrorCode`, or
+  `Pm2AdapterErrorCode` — see `core/audit-types.ts`), `findings` is always
+  empty, and `message` is one of a fixed set of static strings looked up
+  from `code` (`AUDIT_ERROR_MESSAGES` in `commands/audit.ts`) — never
+  anything derived from raw file or process content. `subject.process` is
+  still included whenever the requested process name at least passed
+  syntax validation, independent of whether the run actually found it, so
+  a `process_not_found` failure can still say which (validated) name was
+  requested.
+
+This is distinct from an _unexpected_ internal error, which never produces
+an `AuditResult` at all: an uncaught exception anywhere in the pipeline is
+handled entirely by the CLI's top-level catch (`core/internal-error.ts`,
+also exit code `1`), which never prints the original `Error.message` or
+stack, exactly as documented in the Redaction contract above.
+
 ## Out of scope for this milestone
 
-- Any of the eight rule checks actually running (PS001–PS008 are defined as
-  stable identifiers, and the PM2 adapter above can now supply the live
-  data they will need, but no rule compares that data against declared
-  configuration yet).
-- Wiring the PM2 adapter into the public `procseal audit` command. `audit`
-  still always reports `not_implemented`, regardless of the adapter's
-  existence.
+- PS004, PS006, PS007, and PS008. The identifiers are stable and reserved,
+  but no detection logic exists for them yet.
+- Comparing against ecosystem files, PM2 dump state, or more than one
+  process/file per run. Every audit remains exactly one explicit
+  `--process` and one explicit `--env`; nothing is auto-discovered.
+- Remediation text, configurable severity thresholds, or a policy engine.
 - Automatic remediation of any kind. ProcSeal only reports; it never
   changes configuration or process state.
 

@@ -325,3 +325,180 @@ issues, all fixed here before merge:
 - PS001–PS008 detection logic (comparing declared configuration against
   the live PM2 snapshot) remains fully deferred to the next milestone. This
   milestone is the adapter and its safety proof only.
+
+## [Unreleased] — Rule engine milestone
+
+### Added
+
+- `procseal audit` now performs a real, read-only comparison between one
+  explicitly selected PM2 process and one explicitly selected dotenv
+  file, via new `--process <name>` and `--env <path>` options (plus
+  `--json` and `--check-unexpected`). Both are required; ProcSeal never
+  auto-discovers either. The obsolete `not_implemented` result is gone:
+  `procseal audit` now reports `status: "completed"` (exit `0` with zero
+  findings, exit `3` with one or more) or `status: "failed"` (exit `1`,
+  a stable non-sensitive `code` and a fixed static `message`, never raw
+  file/process content). Usage errors remain exit `2`.
+- Four rules are implemented (`src/rules/engine.ts`, a pure function with
+  no I/O): PS001 (declared and live values differ), PS002 (a declared
+  variable is missing from the live process), PS003 (an unexpected live
+  variable exists — only reported with `--check-unexpected`, otherwise
+  never evaluated at all, not merely hidden), and PS005 (the declared and
+  live `PORT` values differ, reported instead of PS001 specifically for
+  `PORT`). PS004, PS006, PS007, and PS008 remain fully deferred — the
+  identifiers are stable and reserved, but no detection logic exists for
+  them. Every finding's `details` carries only a validated variable name;
+  PS005 never carries either side's actual port number.
+- A read-only dotenv-file adapter (`src/adapters/dotenv-file.ts`,
+  `src/core/dotenv-file-types.ts`) that reads exactly the file passed to
+  `--env`:
+  - Opens with `O_NOFOLLOW` and reads via the resulting file descriptor
+    only (never a second path-based lookup) — a symlink at the given path
+    is rejected race-free at `open()` time (`ELOOP`); every subsequent
+    operation targets the exact inode that was opened, immune to the path
+    being replaced afterward. This is descriptor-bound reading, not a
+    guarantee the content itself is unchanged while being read — see the
+    mutation-detection bullet below.
+  - Rejects non-regular files. Reads through a bounded loop (`readBounded`)
+    that allocates a single `maxFileBytes + 1`-byte buffer once and fills
+    it in fixed-size chunks via `readSync`; more than `maxFileBytes + 1`
+    bytes can never be buffered, however large the file is or grows to be
+    while the loop runs, and the read fails with the existing oversized-file
+    error the moment that bound would be exceeded. A pre-read `fstat` size
+    check remains as a fast rejection path.
+  - A pre/post `fstatSync(fd, { bigint: true })` comparison (`dev`, `ino`,
+    `size`, `mtimeNs`, `ctimeNs`) around the read loop detects any
+    same-inode mutation — append, truncate, or an in-place rewrite,
+    including a same-size rewrite that only nanosecond-resolution
+    `mtimeNs`/`ctimeNs` catch — and fails closed with a new stable error
+    code, `env_file_changed_during_read`, discarding whatever was read
+    without parsing it.
+  - Hard limits on variable count (500), key length (120 characters), and
+    value size (8 KiB, measured with `Buffer.byteLength(value, 'utf8')`,
+    not JavaScript's `.length`). Malformed content and duplicate keys both
+    fail the whole read. Every limit fails fast; none truncates and
+    continues.
+  - Registers every **successfully parsed** value in the run's
+    `SecretRegistry` immediately after parsing, before diagnostics,
+    duplicates, or limits are checked — including an earlier value a later
+    duplicate key overwrites, via a new `ParsedDotenv.assignments` field
+    (`src/parsers/dotenv.ts`) that records every successful parse in file
+    order, distinct from the deduped `values` map. A malformed fragment
+    that never successfully parsed is never registered and never appears
+    in its diagnostic. Only values are registered, never keys — dotenv
+    keys are already restricted to `[A-Za-z_][A-Za-z0-9_]*` by the
+    parser's own key pattern, so they cannot be secrets by construction.
+  - Wraps every declared value in the same opaque `ObservedValue` the PM2
+    adapter uses, sharing one `Fingerprinter` per audit run (created once
+    in `runAuditPipeline`) so declared and live values always compare
+    through the same run-scoped HMAC key.
+- Conservative process selection (`src/core/process-selection.ts`): the
+  requested `--process` value must match a strict identifier pattern
+  _before_ the PM2 adapter is ever called (an invalid name never touches
+  PM2 at all), and must then match exactly one live process by name,
+  compared only against each process's already-safe `safeName`. Zero and
+  multiple matches both fail with their own stable error codes
+  (`process_not_found`, `process_ambiguous`); a raw/unsafe PM2 process
+  name is never compared against or exposed.
+- `AuditResult` (`src/core/audit-types.ts`, replacing the old
+  `not_implemented`-only shape previously in `core/types.ts`) gains
+  `code` (present only when `status: "failed"`), `detail` (optional,
+  carried from the failing adapter's own `SafeLabel` detail), and
+  `subject.process` (the audited process's safe name — present whenever
+  the requested name at least passed syntax validation, independent of
+  whether the run succeeded). Both reporters render the new fields through
+  the same `sanitizeForDisplay` boundary as everything else.
+- Extended the isolated real-PM2 end-to-end suite
+  (`tests/e2e/audit-live.test.ts`) to run the real CLI against a real
+  isolated daemon and a real temporary dotenv file, proving exit codes `0`
+  and `3` and zero sentinel leakage end-to-end — not just through the
+  fixture-injected pipeline exercised by
+  `tests/integration/audit-command.test.ts`.
+- `tests/integration/cli.test.ts` now tests the audit command's usage
+  errors and PM2-unreachable failure mode by spawning the real CLI with a
+  `PATH` that deliberately excludes `node_modules/.bin` (and any other
+  directory that might hold a real `pm2`), so these tests can never find a
+  real `pm2` binary and therefore can never reach a real PM2 daemon or
+  `PM2_HOME`, however the machine running them happens to be configured.
+
+### Fixed
+
+- **A validated PM2 process name could be redacted by the registry it was
+  never supposed to be sensitive to.** Real `pm2 jlist` output duplicates
+  a process's name into multiple fields — `name`, `pm2_env.name`, and
+  `pm2_env.axm_options.module_name` were all observed against the pinned
+  `pm2` devDependency — and the PM2 adapter's existing "treat the entire
+  payload as sensitive" registration (correctly) registered all of them.
+  Since a process name is exactly the field the adapter already normalizes
+  into `Pm2ProcessSnapshot.safeName` specifically so it can be displayed,
+  and since `SecretRegistry.scrub` cannot distinguish "this exact string
+  is a raw secret" from "this exact string is a name that was
+  independently validated as safe to display," the new `subject.process`
+  field was being silently redacted to `[REDACTED]` on every completed
+  audit. Fixed by excluding a record's own process name from registration
+  by exact value — not by field path — wherever it recurs within that
+  record, so the fix holds regardless of how many places PM2 puts the name
+  in, across versions and configurations, without needing to enumerate
+  them. The exclusion is scoped per-record: one process's name is never
+  exempted while walking a different process's record. Every other string
+  at any depth is still registered exactly as before. Regression tests
+  (`tests/integration/pm2-adapter.test.ts`) cover both the multi-location
+  duplication and the per-record scoping boundary.
+
+An independent review of this milestone's branch found three further
+merge-blocking gaps in the dotenv-file adapter, all fixed here:
+
+- **Unbounded read on a growing file.** `readFileSync(fd)` read the
+  complete file into memory before the post-read size check ran, so a
+  file that grew after the initial `fstat` could exceed the documented
+  1 MiB memory bound. Replaced with `readBounded()`: a single
+  `maxFileBytes + 1`-byte buffer allocated once, filled by a chunked
+  `readSync` loop that terminates and fails with the existing
+  oversized-file error the instant that bound would be exceeded — never
+  truncating and continuing, never reading further. Short reads and
+  `EINTR`/`EAGAIN` are retried safely without losing or duplicating bytes.
+- **In-place mutation of the open file went undetected.** The existing
+  symlink/path-replacement protections only proved the read was bound to
+  one descriptor; they said nothing about another process truncating,
+  rewriting, or appending to that same, already-open inode during the
+  read. Added an `fstatSync(fd, { bigint: true })` snapshot (`dev`, `ino`,
+  `size`, `mtimeNs`, `ctimeNs`) taken immediately before and after the
+  bounded read; any difference now fails closed with a new
+  `env_file_changed_during_read` error code, discarding the read content
+  before it is ever parsed. Documented accurately as descriptor-bound
+  reading with pre/post mutation detection — not as full race-freedom,
+  which only the symlink-rejection-at-`open()` property actually has.
+- **A duplicate key's earlier value was silently unregistered.** The
+  parser's `values` map keeps only the last-written value per key, and
+  the adapter registered secrets from that map — so an earlier duplicate
+  raw value never reached `SecretRegistry`, even though the file
+  genuinely contained it and the adapter's documentation claimed every
+  declared value was registered. Added `ParsedDotenv.assignments`
+  (`src/parsers/dotenv.ts`), an order-preserving record of every
+  successfully parsed occurrence including ones a later duplicate key
+  overwrites; the adapter now registers every occurrence in
+  `assignments`, before diagnostics or limits are checked. A malformed
+  fragment that never successfully parsed still never appears in
+  `assignments` and never appears in its diagnostic.
+
+Regression tests added through an injected, deterministic
+instrumentation seam (`onChunkReadForTesting`/`readChunkBytesForTesting`
+in `ReadDotenvFileOptions`) — no timing-dependent or background-race
+tests: a file that keeps growing during the read cannot cause more than
+`maxFileBytes + 1` bytes to be buffered; append, truncate, and a
+same-size in-place rewrite (caught via `mtimeNs`/`ctimeNs`, not size
+alone) all fail closed with `env_file_changed_during_read`; an untouched
+read does not false-positive; and a duplicate-key file with two unique
+sentinel values proves neither the overwritten nor the final value
+reaches terminal, JSON, or error output.
+
+### Notes
+
+- `README.md` was updated with the real, implemented CLI behavior and
+  rule documentation for this milestone. The broader visual/product-page
+  README redesign remains tracked separately as a release-gate item and is
+  not part of this change.
+- PS004, PS006, PS007, and PS008 remain fully deferred, as do ecosystem
+  files, PM2 dump state comparison, and multi-process/multi-file audits —
+  every audit remains exactly one explicit `--process` and one explicit
+  `--env`.
