@@ -548,17 +548,17 @@ reaches terminal, JSON, or error output.
     under two names within the selected process is one cluster, not two
     — repetition confined to a single application never produces a
     finding, only reuse confirmed in at least one genuinely distinct
-    other process does.
+    other application does.
   - **Ordering**: each qualifying cluster produces exactly one finding —
     `variable` (the alphabetically-first name in the cluster) and
-    `reusedInProcessCount` (a plain decimal string counting _other_
-    distinct processes holding the value — other processes' names are
-    deliberately not enumerated, keeping finding size bounded regardless
-    of fleet size). Findings are returned sorted by `variable`, so three
-    or more applications sharing one value still produce exactly one
-    deterministic finding, never a combinatorial explosion, and the same
-    input snapshot always produces the same output order regardless of
-    PM2's own array or object-key order.
+    `reusedInApplicationCount` (a plain decimal string counting _other_
+    distinct applications holding the value — other applications' names
+    are deliberately not enumerated, keeping finding size bounded
+    regardless of fleet size). Findings are returned sorted by `variable`,
+    so three or more applications sharing one value still produce exactly
+    one deterministic finding, never a combinatorial explosion, and the
+    same input snapshot always produces the same output order regardless
+    of PM2's own array or object-key order.
   - Severity `critical` — the first rule in this project to use it,
     reflecting that a shared credential's blast radius spans every
     application holding it.
@@ -567,6 +567,52 @@ reaches terminal, JSON, or error output.
   "Deferred" to "Implemented," and adds a "Candidate policy" section
   matching the README. `src/cli.ts`'s top-level usage line also mentions
   `--check-reuse`.
+
+### Fixed
+
+An independent review of this milestone's branch, before merge, found
+that `evaluateReuseRule()` counted reuse per PM2 _process record_
+(`safeProcessId`) rather than per _application_ (PM2's process name).
+PM2's cluster mode runs one application as several process records — one
+per worker, all reporting the same name — so an application running
+`N` cluster workers, each sharing an eligible value with the selected
+process, was being counted as `N` separate "other applications" instead
+of one. Fixed here, before this milestone's initial merge:
+
+- Reuse is now defined and grouped by **safe application name**
+  (`safeName`), never by process record. Every process in the run's
+  snapshot is grouped by `safeName`; a cluster is checked against each
+  distinct group, not each distinct record.
+- A process record whose `safeName` equals the selected process's own
+  `safeName` — another cluster worker of the same application — is never
+  counted as a distinct "other" application, however many such records
+  exist. This is also what makes a value repeated only across the
+  selected application's own worker records correctly produce no finding.
+- A process whose `safeName` is the redaction placeholder (`[REDACTED]`,
+  produced when the raw PM2 name fails `SafeLabel` validation) is
+  excluded entirely from the "other applications" grouping.
+  `[REDACTED]` is never treated as a shared application identity — two
+  different unsafe-named processes must never be silently merged into
+  "one" application by string equality on the placeholder, and a match
+  against either must never be misattributed to a fabricated shared
+  identity. This is a deliberate, documented false-negative boundary: a
+  value reused only among applications with unsafe/unattributable names
+  is never reported.
+- An environment variable whose own name is invalid (fails PM2's
+  `ENV_KEY_PATTERN`, `src/adapters/pm2.ts`) is now also excluded from
+  `reuseCandidate` eligibility at the source — `normalizeEnvironment`
+  gates the flag on the key having validated to a real, safe label, not
+  only on the candidate policy — so an invalid key name can never produce
+  an ambiguous PS004 finding that would otherwise reference the
+  redaction placeholder as if it were a real variable name.
+  `evaluateReuseRule` additionally re-checks this defensively (a
+  redacted-name variable is filtered out even if some other caller
+  mismarked it as a candidate), consistent with this project's layered-
+  defense pattern elsewhere.
+- Renamed the finding detail `reusedInProcessCount` to
+  `reusedInApplicationCount` throughout — code, tests, and docs — while
+  the project is still pre-release, so the field name matches what it has
+  always actually counted.
 
 ### Testing
 
@@ -577,23 +623,44 @@ reaches terminal, JSON, or error output.
   multibyte value where `.length` would undercount), and combined
   eligibility.
 - `tests/unit/reuse-rule.test.ts`: two-application reuse, reuse under a
-  different sensitive name, no finding for a same-process-only repeat, no
-  finding when the matching side isn't independently eligible, short/
-  common/non-sensitive values (including `PORT`, `NODE_ENV`, paths, and
-  booleans) never triggering, three-or-more-application deduplication,
+  different sensitive name, no finding for a same-application-only
+  repeat, no finding when the matching side isn't independently eligible,
+  short/common/non-sensitive values (including `PORT`, `NODE_ENV`, paths,
+  and booleans) never triggering, three-or-more-application deduplication,
   multiple distinct reused values reported as separate findings sorted
   deterministically, order-independence of the input snapshot, the
   alphabetically-first-name tie-break, an adversarial no-raw-value
-  serialization proof, and exclusion of the selected process from its own
-  "other processes" comparison by `safeProcessId`.
+  serialization proof, exclusion of the selected process from its own
+  "other applications" comparison by safe application name — plus, added
+  for the application-identity fix: one other application's four cluster
+  workers counting as exactly one distinct application; two distinct
+  application names counting as two, with equal worker counts; three
+  applications each running multiple cluster workers producing the
+  correct distinct-application count; duplicate cluster-worker records of
+  the selected application itself never self-triggering, even alongside a
+  genuinely different application; a process with an unsafe/redacted
+  application name being excluded from the comparison entirely; and a
+  redacted-name variable being excluded from candidate eligibility on
+  either side, even when `reuseCandidate` was deliberately mismarked to
+  prove the rule's own defense-in-depth check.
 - `tests/integration/pm2-adapter.test.ts`: `reuseCandidate` computed
   correctly by the real adapter for a mix of eligible and ineligible
-  variables in one payload.
+  variables in one payload, plus a new test proving a key name that fails
+  `ENV_KEY_PATTERN` is never a candidate even when it reads as sensitive
+  and is long enough.
 - `tests/integration/audit-command.test.ts`: the same scenarios exercised
   through the full `executeAuditCommand` pipeline, plus explicit proof
   that `--check-reuse` absent produces zero PS004 findings even when a
-  value is genuinely shared with another process, and that `--check-reuse`
-  parses correctly (on by explicit flag only, off by default).
+  value is genuinely shared with another application, that `--check-reuse`
+  parses correctly (on by explicit flag only, off by default), and — for
+  this fix — cluster-mode worker counting through the full pipeline, a
+  redacted application name being excluded, an invalid variable key name
+  being excluded, fleet-ordering independence, and a test documenting
+  that `--process` selection already rejects a name matched by multiple
+  cluster-worker records (`process_ambiguous`) before any rule ever runs,
+  so "the selected application has duplicate records of itself" cannot
+  reach `evaluateReuseRule` through the real CLI — that guarantee is
+  instead proven directly against the pure rule.
 - A new real, isolated end-to-end test in `tests/e2e/audit-live.test.ts`
   starts two real PM2 processes under one temporary `PM2_HOME`, each
   holding the same sentinel value under a different sensitive variable
@@ -616,6 +683,11 @@ reaches terminal, JSON, or error output.
   floor, and can rarely flag an intentionally shared long value under a
   credential-shaped key name. It is not, and is not claimed to be,
   universal secret detection.
+- PS004 also has a documented false-negative boundary around application
+  identity: a value reused only among PM2 applications whose raw names
+  fail safe-label validation is never reported, since `[REDACTED]` is
+  deliberately never treated as a shared application identity (see
+  "Fixed" above).
 - The Issue #3 visual/product-page README redesign is not part of this
   change; documentation updates here are limited to factual CLI behavior,
   rule documentation, and the candidate policy.

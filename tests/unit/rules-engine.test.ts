@@ -294,5 +294,5 @@ test('PS004 fires through the full evaluateRules pipeline when checkReuse is tru
   });
   assert.equal(findings.length, 1);
   assert.equal(findings[0]!.ruleId, 'PS004');
-  assert.deepEqual(findings[0]!.details, { variable: 'API_KEY', reusedInProcessCount: '1' });
+  assert.deepEqual(findings[0]!.details, { variable: 'API_KEY', reusedInApplicationCount: '1' });
 });

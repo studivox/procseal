@@ -25,8 +25,13 @@ PS002, PS003 (opt-in via `--check-unexpected`), and PS005. A fourth
 milestone added PS004 (cross-application sensitive-value reuse detection,
 opt-in via `--check-reuse`) on top of the same read-only PM2 adapter — no
 new command, no second PM2 invocation, just a comparison against
-processes already present in the same run's snapshot. `procseal
-audit` no longer reports `not_implemented` — see
+applications already present in the same run's snapshot. An independent
+review of that milestone before merge found that reuse was being counted
+per PM2 _process record_ rather than per _application_, so a clustered
+application's own worker records were miscounted as separate other
+applications; fixed by grouping the snapshot by safe application name
+before comparing — see [docs/THREAT_MODEL.md](THREAT_MODEL.md) for the
+full design. `procseal audit` no longer reports `not_implemented` — see
 [docs/THREAT_MODEL.md](THREAT_MODEL.md) and the project `README.md` for
 the current status and exit-code contract.
 

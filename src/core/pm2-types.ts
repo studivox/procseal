@@ -34,6 +34,13 @@ export interface Pm2EnvironmentVariable {
    * heuristic, not proof a value is (or isn't) a secret — see
    * `core/reuse-candidate-policy.ts` for the exact policy and its
    * documented limitations.
+   *
+   * Also `false` whenever `name` above is the redaction placeholder (the
+   * raw key failed `ENV_KEY_PATTERN` validation in
+   * `src/adapters/pm2.ts`) — an invalid key name has no safe, unambiguous
+   * label a PS004 finding could report, so such a variable is never a
+   * candidate on either side of a comparison, regardless of what the
+   * policy would otherwise decide about its value.
    */
   readonly reuseCandidate: boolean;
 }

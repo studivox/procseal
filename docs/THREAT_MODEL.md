@@ -468,14 +468,16 @@ either could leak through some other channel while its flag is off.
 ### PS004: cross-application sensitive-value reuse
 
 `--check-reuse` compares the selected process's PS004-_eligible_
-environment values (see "Candidate policy" below) against every _other_
-process already present in the same run's PM2 snapshot — no second PM2
-invocation, no new command, and no change to the read-only `pm2 jlist`
-adapter call. `src/rules/reuse.ts` (`evaluateReuseRule`) is a pure
-function operating only on the already-normalized `Pm2ProcessSnapshot`s
-the adapter returned for this run; it makes no I/O and never reads a raw
-value — every comparison goes through `ObservedValue.equals()` against
-values already marked eligible.
+environment values (see "Candidate policy" below) against every _other
+PM2 application_ already present in the same run's PM2 snapshot — no
+second PM2 invocation, no new command, and no change to the read-only
+`pm2 jlist` adapter call. `src/rules/reuse.ts` (`evaluateReuseRule`) is a
+pure function operating only on the already-normalized
+`Pm2ProcessSnapshot`s the adapter returned for this run; it makes no I/O
+and never reads a raw value — every comparison goes through
+`ObservedValue.equals()` against values already marked eligible.
+Applications, not process records, are what PS004 compares — see
+"Application identity, not process records" below.
 
 - **Candidate policy** (`src/core/reuse-candidate-policy.ts`, centralized
   and the sole place this decision is made): a `{key, value}` pair is a
@@ -498,49 +500,92 @@ values already marked eligible.
   boolean result is stored as `Pm2EnvironmentVariable.reuseCandidate`
   (`core/pm2-types.ts`) — the rule engine and reporters downstream of the
   adapter never see a raw value or a raw length, only this derived flag.
-  Only eligible-vs-eligible pairs are ever compared: a long value under a
+  `reuseCandidate` is also `false` whenever the key itself failed
+  `ENV_KEY_PATTERN` validation (the same gate that decides whether the
+  variable's `name` is the raw key or the redaction placeholder) — an
+  invalid key name is never a candidate on either side, regardless of what
+  the policy would otherwise decide about its value, so a PS004 finding
+  can never reference an ambiguous or redacted variable name. Only
+  eligible-vs-eligible pairs are ever compared: a long value under a
   non-credential-looking key on either side of a potential match is never
   treated as reused, even if it happens to equal an eligible value
   elsewhere — this is what lets PS004 detect reuse under a _different_
   sensitive variable name (e.g. `API_KEY` in one app, `CLIENT_SECRET` in
   another) without also matching on ordinary configuration values that
   happen to collide.
+- **Application identity, not process records**: PM2 cluster mode runs
+  one application as several process records (one per worker), all
+  sharing the same `safeName`. An earlier version of this rule grouped
+  "other processes" by `safeProcessId` — unique per record, not per
+  application — so a clustered application's own workers were each
+  counted as a separate "other application," inflating
+  `reusedInApplicationCount` for a value that was really shared with only
+  one other app. An independent review caught this before merge; fixed by
+  grouping every process in the run's snapshot by `safeName` instead:
+  - A process whose `safeName` equals the selected process's `safeName`
+    belongs to the _same_ application (most commonly, another cluster
+    worker of it) and is never counted as "another" application, however
+    many such records exist — this is also what makes a value repeated
+    only across the selected application's own workers correctly produce
+    no finding.
+  - Multiple worker records of one genuinely _different_ application,
+    all sharing one `safeName`, still count as exactly one other
+    application, never one per worker.
+  - A process whose `safeName` is the redaction placeholder (its raw PM2
+    name failed `SafeLabel` validation) is excluded entirely from the
+    "other applications" grouping. `[REDACTED]` is never used as a shared
+    application identity: two _different_ unsafe-named processes would
+    otherwise be silently merged into "one" application, or a match
+    against either would be misattributed to a fabricated shared
+    identity. This is a deliberate, documented false-negative boundary —
+    a value reused only among applications with unsafe/unattributable
+    names is never reported by PS004.
 - **Deduplication and ordering**: the selected process's eligible
   variables are first clustered by `ObservedValue.equals()`, so the same
   value declared under two names _within the selected process_ is one
   cluster, not two — this is what makes "repeated only inside one
   application" correctly produce no finding, since a cluster only becomes
-  a finding once at least one _other_, distinct process (compared by
-  `safeProcessId`, never object identity) is found to hold an equal
-  eligible value. Each qualifying cluster produces exactly one finding —
-  `variable` (the alphabetically-first name in the cluster, deterministic)
-  and `reusedInProcessCount` (the number of _other_ distinct processes
-  found to hold the value, as a plain decimal string — other processes'
+  a finding once at least one _other_, distinct application (grouped by
+  `safeName`, as above) is found to hold an equal eligible value. Each
+  qualifying cluster produces exactly one finding — `variable` (the
+  alphabetically-first name in the cluster, deterministic) and
+  `reusedInApplicationCount` (the number of _other_ distinct applications
+  found to hold the value, as a plain decimal string — other applications'
   names are deliberately not enumerated, so a finding's size stays bounded
   regardless of fleet size). Findings are returned sorted by `variable`,
   ascending — deterministic, independent of PM2's own array or object-key
   order, so three or more applications sharing one value still produce
   exactly one finding, never a combinatorial explosion from pairwise
-  matches. Severity is `critical`, the highest defined severity — the
-  first rule to use it, reflecting that a shared credential's blast radius
-  spans every application holding it.
+  matches, and cluster-mode worker counts never leak into the count.
+  Severity is `critical`, the highest defined severity — the first rule to
+  use it, reflecting that a shared credential's blast radius spans every
+  application holding it.
 - **Testing**: `tests/unit/reuse-candidate-policy.test.ts` covers the
   policy in isolation (key-name recognition and casing/separator
   normalization, the length floor measured in UTF-8 bytes, common
   false-positive-prone values like `PORT`/`NODE_ENV`/paths/booleans).
-  `tests/unit/reuse-rule.test.ts` covers `evaluateReuseRule` directly
-  (two-app reuse, reuse under a different name, no finding for a
-  same-process-only repeat, no finding when the matching side isn't
+  `tests/unit/reuse-rule.test.ts` covers `evaluateReuseRule` directly:
+  two-app reuse, reuse under a different name, no finding for a
+  same-application-only repeat, no finding when the matching side isn't
   itself eligible, three-plus-app dedup, multiple distinct values reported
-  separately, deterministic ordering regardless of input array order, and
-  an adversarial serialization check). `tests/integration/audit-command.test.ts`
-  exercises the same scenarios through the full `executeAuditCommand`
-  pipeline, including the `--check-reuse` gate itself. A real, isolated
-  end-to-end test (`tests/e2e/audit-live.test.ts`) starts two real PM2
-  processes under one temporary `PM2_HOME`, sharing a sentinel value under
-  two different variable names, and proves PS004 fires only with
-  `--check-reuse` and never reveals the shared value in JSON or terminal
-  output.
+  separately, deterministic ordering regardless of input array order, an
+  adversarial serialization check, one other application's four cluster
+  workers counting as one, two distinct application names counting as
+  two, three applications each running multiple workers producing the
+  correct distinct count, duplicate worker records of the selected
+  application never self-triggering, an unsafe/redacted application name
+  being excluded, and a redacted variable name being excluded on either
+  side even if `reuseCandidate` was mismarked. `tests/integration/pm2-adapter.test.ts`
+  proves the real adapter never marks an invalid key name as a candidate.
+  `tests/integration/audit-command.test.ts` exercises the same scenarios
+  through the full `executeAuditCommand` pipeline, including the
+  `--check-reuse` gate, cluster-mode worker counting, redacted
+  application/variable names, and fleet-ordering independence. A real,
+  isolated end-to-end test (`tests/e2e/audit-live.test.ts`) starts two
+  real PM2 processes under one temporary `PM2_HOME`, sharing a sentinel
+  value under two different variable names, and proves PS004 fires only
+  with `--check-reuse` and never reveals the shared value in JSON or
+  terminal output.
 
 ### The audit result and orchestration order
 

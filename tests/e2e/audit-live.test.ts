@@ -319,7 +319,7 @@ test(
       const ps004 = withParsed.findings.filter((f) => f.ruleId === 'PS004');
       assert.equal(ps004.length, 1);
       assert.equal(ps004[0]!.details?.['variable'], 'API_KEY');
-      assert.equal(ps004[0]!.details?.['reusedInProcessCount'], '1');
+      assert.equal(ps004[0]!.details?.['reusedInApplicationCount'], '1');
       assert.equal(withFlag.stdout.includes(SHARED_SECRET), false);
 
       // Terminal (non-JSON) output for the same scenario: PS004 present, no raw value.
