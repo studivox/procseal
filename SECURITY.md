@@ -2,7 +2,7 @@
 
 ## Project status
 
-ProcSeal is currently pre-alpha and has no supported production release. Do not rely on it as a security boundary.
+ProcSeal is at `v0.1.0` — an early release with a deliberately narrow, verified scope (see the project `README.md`). It is a diagnostic aid, not a security boundary: a clean audit does not certify that a deployment is secure.
 
 ## Reporting a vulnerability
 

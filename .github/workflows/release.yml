@@ -1,0 +1,107 @@
+name: Publish
+
+# Fires only for an explicit, stable version tag (e.g. v0.1.0) — never on a
+# normal push to a branch, and never on a pull request. Pushing a tag is a
+# manual, deliberate act; this workflow does not run as a side effect of
+# any other CI activity. This file being present does NOT publish
+# anything by itself — nothing is published until a maintainer pushes a
+# matching tag, and that has not happened as part of adding this file.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+# Repository-level default: read-only. The job below elevates only the
+# one permission npm's OIDC trusted-publishing flow requires
+# (id-token: write), and nothing else.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build, verify, and publish to npm with provenance
+    runs-on: ubuntu-latest
+    # Optional extra gate: if a GitHub Environment named `npm-publish` has
+    # required reviewers configured (recommended — see docs/RELEASE.md),
+    # this job pauses for manual approval before running. An environment
+    # with no protection rules behaves identically to not specifying one.
+    environment: npm-publish
+    permissions:
+      contents: read
+      # The only elevated permission this workflow needs: it lets npm
+      # request a short-lived OIDC token from GitHub and exchange it with
+      # npm's registry for a one-time publish credential. No npm token of
+      # any kind is stored in this repository — see docs/RELEASE.md for
+      # the one-time npmjs.com "trusted publisher" configuration this
+      # depends on.
+      id-token: write
+    steps:
+      # Actions are pinned to immutable, full commit SHAs (not a mutable
+      # tag) so this workflow always runs the exact code it was reviewed
+      # against, even if the upstream tag is later moved or the action
+      # repository is compromised. The trailing `# vX.Y.Z` comment records
+      # which released version each SHA corresponds to, for humans only.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Exact pin, not a floating major/minor: npm trusted publishing
+          # requires npm CLI 11.5.1+ and Node 22.14.0+, and an exact pin
+          # on the release toolchain avoids release-time supply-chain
+          # drift (a later Node 22.x patch silently changing the bundled
+          # npm version this workflow ends up running).
+          node-version: 22.14.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm supports OIDC trusted publishing
+        # Exact pin, matching the Node pin above — not `npm@latest`, which
+        # would let the exact npm CLI version drift between releases.
+        run: npm install -g npm@11.5.1
+
+      - name: Print toolchain versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Clean install
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Adapter integration tests
+        run: npm run test:integration
+
+      - name: Isolated real-PM2 E2E test
+        run: npm run test:e2e
+        env:
+          PM2_HOME: ''
+
+      - name: Build
+        run: npm run build
+
+      - name: Package dry-run inspection
+        run: npm pack --dry-run
+
+      - name: Verify the pushed tag matches package.json's version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag v$tag_version does not match package.json version $pkg_version — refusing to publish a mismatched release."
+            exit 1
+          fi
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public

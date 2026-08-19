@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 220" width="960" height="220" role="img" aria-label="ProcSeal: local-first configuration and secret drift detector for PM2 processes">
+  <title>ProcSeal</title>
+  <defs>
+    <linearGradient id="hero-seal-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14B8A6"/>
+      <stop offset="100%" stop-color="#0F766E"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon, same construction as docs/assets/logo.svg, transposed into the banner -->
+  <g transform="translate(20, 30) scale(1.17)">
+    <path
+      d="M64 4 L118 34 L118 94 L64 124 L10 94 L10 34 Z"
+      fill="none" stroke="url(#hero-seal-gradient)" stroke-width="7" stroke-linejoin="round"
+    />
+    <path
+      d="M64 20 L104 42.5 L104 85.5 L64 108 L24 85.5 L24 42.5 Z"
+      fill="none" stroke="#0F766E" stroke-opacity="0.45" stroke-width="2.5" stroke-linejoin="round"
+    />
+    <path
+      d="M42 65 L58 81 L88 47"
+      fill="none" stroke="url(#hero-seal-gradient)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"
+    />
+  </g>
+
+  <!-- Wordmark. Colors are chosen to stay legible on both GitHub's light
+       and dark README backgrounds (this file has a transparent
+       background and is not theme-aware, so no color here can be
+       perfect on both — these are deliberately mid-brightness). -->
+  <text x="200" y="118" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="64" font-weight="700" fill="#64748B">
+    Proc<tspan fill="#14B8A6">Seal</tspan>
+  </text>
+
+  <!-- Tagline -->
+  <text x="202" y="155" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="22" fill="#94A3B8">
+    Detect PM2 configuration drift without printing secrets
+  </text>
+</svg>

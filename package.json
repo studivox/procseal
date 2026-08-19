@@ -1,7 +1,6 @@
 {
   "name": "procseal",
-  "version": "0.1.0-alpha.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "Local-first CLI that detects configuration and secret drift in PM2-managed processes, without revealing secret values.",
   "keywords": [
     "pm2",
@@ -32,7 +31,8 @@
     "dist",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/assets"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -44,7 +44,8 @@
     "test:unit": "tsx --test $(find tests/unit -name '*.test.ts')",
     "test:integration": "tsx --test $(find tests/integration -name '*.test.ts')",
     "test:e2e": "tsx --test $(find tests/e2e -name '*.test.ts')",
-    "test": "npm run test:unit && npm run test:integration && npm run test:e2e"
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "docs:check-links": "node scripts/check-docs-links.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

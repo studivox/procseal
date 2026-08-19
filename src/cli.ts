@@ -29,10 +29,10 @@ Usage:
   procseal audit --process <pm2-process-name> --env <path> [--json] [--check-unexpected] [--check-reuse]
 
 Status:
-  pre-alpha. "procseal audit" performs a real, read-only comparison between
-  one explicitly selected PM2 process and one explicitly selected dotenv
-  file. Run "procseal audit --help" for the full option and exit-code
-  reference.
+  v0.1.0 — early release, narrow scope by design. "procseal audit"
+  performs a real, read-only comparison between one explicitly selected
+  PM2 process and one explicitly selected dotenv file. Run "procseal
+  audit --help" for the full option and exit-code reference.
 
 Exit codes:
   0  The audit completed with zero findings.
