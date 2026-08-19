@@ -1,5 +1,15 @@
 name: CI
 
+# Tested combinations (kept intentionally bounded — see the two jobs
+# below): format/lint/typecheck run once, on Ubuntu with Node 22; the
+# full test suite (unit, integration, and the isolated real-PM2 E2E test)
+# runs on every combination of:
+#   OS:   ubuntu-latest, macos-latest
+#   Node: 20, 22
+# i.e. 4 test jobs, not 8 — the OS/Node matrix validates real PM2 process
+# behavior on each platform without repeating style/type checks that are
+# platform-independent.
+
 on:
   push:
     branches: [main]
@@ -9,19 +19,17 @@ permissions:
   contents: read
 
 jobs:
-  build-and-test:
+  lint-and-format:
+    name: Lint, format, typecheck
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [20, 22]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js ${{ matrix.node-version }}
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22
           cache: npm
 
       - name: Clean install
@@ -36,6 +44,30 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Check README links and assets
+        run: npm run docs:check-links
+
+  test:
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [20, 22]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Clean install
+        run: npm ci
+
       - name: Unit tests
         run: npm run test:unit
 
@@ -49,7 +81,8 @@ jobs:
           # PM2_HOME from a fresh mkdtemp() directory (see
           # tests/e2e/pm2-isolation-guard.ts), the runner's own PM2_HOME is
           # deliberately left unset here so there is no ambient real PM2_HOME
-          # for a test bug to accidentally inherit.
+          # for a test bug to accidentally inherit. This holds on every OS
+          # in the matrix — the isolation guard is platform-independent.
           PM2_HOME: ''
 
       - name: Build

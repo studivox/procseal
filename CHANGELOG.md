@@ -2,10 +2,16 @@
 
 All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This
-project uses pre-release versioning while in early development and has not
-been published to npm.
+project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-19
+
+The first tagged release. Everything below landed across four development
+milestones on the way here (CLI foundation, PM2 adapter, rule engine,
+cross-application secret reuse) — kept as separate subsections for an
+accurate history of what changed and why, not rewritten into one flat list.
+
+**CLI foundation**
 
 ### Added
 
@@ -107,7 +113,9 @@ cases.
 - Documentation was updated to use `npx procseal audit` instead of the
   earlier planned `scan` subcommand name.
 
-## [Unreleased] — PM2 adapter milestone
+---
+
+**PM2 adapter milestone**
 
 ### Added
 
@@ -326,7 +334,9 @@ issues, all fixed here before merge:
   the live PM2 snapshot) remains fully deferred to the next milestone. This
   milestone is the adapter and its safety proof only.
 
-## [Unreleased] — Rule engine milestone
+---
+
+**Rule engine milestone**
 
 ### Added
 
@@ -503,7 +513,9 @@ reaches terminal, JSON, or error output.
   every audit remains exactly one explicit `--process` and one explicit
   `--env`.
 
-## [Unreleased] — Cross-application secret-reuse detection milestone
+---
+
+**Cross-application secret-reuse detection milestone**
 
 ### Added
 
@@ -688,6 +700,73 @@ of one. Fixed here, before this milestone's initial merge:
   fail safe-label validation is never reported, since `[REDACTED]` is
   deliberately never treated as a shared application identity (see
   "Fixed" above).
-- The Issue #3 visual/product-page README redesign is not part of this
-  change; documentation updates here are limited to factual CLI behavior,
-  rule documentation, and the candidate policy.
+- The Issue #3 visual/product-page README redesign was deliberately out
+  of scope for this milestone; documentation updates here were limited to
+  factual CLI behavior, rule documentation, and the candidate policy. It
+  landed in the release-readiness pass below.
+
+---
+
+**Release readiness**
+
+### Added
+
+- `package.json`: version set to `0.1.0`, `"private": true` removed, and
+  metadata (description, keywords, homepage, bugs, repository, license,
+  author, engines, `bin`, `files`) reviewed for accuracy ahead of
+  publication. Package name availability on the public npm registry was
+  independently re-checked immediately before this release-readiness pass
+  (see docs/RELEASE.md).
+- `.github/workflows/release.yml`: a minimal, security-reviewed publish
+  workflow, triggered only by pushing an explicit stable version tag
+  (`vX.Y.Z`) — never by a normal push or pull request. Uses npm's OIDC
+  trusted-publishing flow (`id-token: write`, no stored npm token of any
+  kind), pins every third-party GitHub Action to an immutable commit SHA,
+  re-runs the full validation suite before publishing, verifies the
+  pushed tag matches `package.json`'s version, and publishes with
+  `npm publish --provenance --access public`. Adding this file does not
+  publish anything — see docs/RELEASE.md for the one-time npmjs.com
+  "trusted publisher" configuration a maintainer must still complete
+  before the first real publish, and confirmation that no tag, GitHub
+  release, or npm publish happened as part of landing this file.
+- `.github/workflows/ci.yml`: extended to validate Linux and macOS
+  behavior. Format/lint/typecheck run once (platform-independent);
+  unit/integration/the isolated real-PM2 E2E test run across all four
+  combinations of `{ubuntu-latest, macos-latest} × {Node 20, Node 22}` —
+  bounded, not duplicated, matrix work. Documented directly in the
+  workflow file and in README's "Supported platforms" section.
+- `scripts/check-docs-links.mjs` (wired into CI as `npm run
+docs:check-links`): deterministic, network-free validation that every
+  repository-relative link and image in README.md resolves to a real
+  file, every in-page anchor resolves to an actual heading (using
+  GitHub's own heading-to-slug algorithm), and every referenced SVG asset
+  is well-formed.
+- `docs/assets/logo.svg` and `docs/assets/hero-banner.svg`: original,
+  repository-owned SVG artwork (a hexagonal seal with a checkmark) — no
+  external image generator, no visitor counters, no fake metrics.
+- README.md rewritten as ProcSeal's product page (Issue #3): value
+  proposition and a concrete PM2 drift scenario above the fold, a 30-second
+  Quick Start, npm and verified local-install instructions, a reproducible
+  terminal demo with real captured output from the packed release
+  candidate (synthetic values only), the implemented-rules table with
+  `PS006`–`PS008` clearly marked planned, an exit-code table, the security
+  model, a Mermaid architecture/data-flow diagram, CI/CD usage, a
+  supported-platforms table, limitations and non-goals, an FAQ, and the
+  existing contributing/security/license/roadmap/attribution sections.
+  Every command shown was executed against a `npm pack`-installed tarball
+  in a fresh temporary project, not only the source checkout.
+- `docs/RELEASE.md`: the exact, verified release procedure — trusted
+  publisher prerequisites, tag/release commands, rollback/deprecation
+  guidance, and post-publication smoke tests.
+- `SECURITY.md` and `docs/ROADMAP.md` reviewed and brought up to date for
+  the `v0.1.0` release.
+
+### Notes
+
+- GitHub Sponsors / `FUNDING.yml` is deliberately not part of this
+  release; sponsorship setup is tracked separately.
+- This release-readiness pass adds no new detection rule and does not
+  expand product scope — `PS001`–`PS005` are exactly what shipped in the
+  milestones above.
+- Nothing was tagged, published to npm, or released as part of this
+  change. See docs/RELEASE.md for the exact remaining manual steps.

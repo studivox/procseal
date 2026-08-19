@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="ProcSeal logo: a hexagonal seal with a checkmark, representing a verified, sealed configuration audit">
+  <title>ProcSeal</title>
+  <defs>
+    <linearGradient id="procseal-seal-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14B8A6"/>
+      <stop offset="100%" stop-color="#0F766E"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer seal: a hexagonal badge, evoking a wax seal / verification stamp -->
+  <path
+    d="M64 4
+       L118 34
+       L118 94
+       L64 124
+       L10 94
+       L10 34
+       Z"
+    fill="none"
+    stroke="url(#procseal-seal-gradient)"
+    stroke-width="7"
+    stroke-linejoin="round"
+  />
+  <!-- Inner ring: the "process" boundary being sealed -->
+  <path
+    d="M64 20
+       L104 42.5
+       L104 85.5
+       L64 108
+       L24 85.5
+       L24 42.5
+       Z"
+    fill="none"
+    stroke="#0F766E"
+    stroke-width="2.5"
+    stroke-opacity="0.45"
+    stroke-linejoin="round"
+  />
+  <!-- Checkmark: audit verdict -->
+  <path
+    d="M42 65 L58 81 L88 47"
+    fill="none"
+    stroke="url(#procseal-seal-gradient)"
+    stroke-width="9"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

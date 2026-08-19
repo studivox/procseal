@@ -1,6 +1,6 @@
 # Contributing to ProcSeal
 
-Thank you for helping build ProcSeal. The project is currently pre-alpha, so small, reviewable changes are preferred.
+Thank you for helping build ProcSeal. The project is at an early `v0.1.0` release with a deliberately narrow scope, so small, reviewable changes are preferred.
 
 ## Before contributing
 
@@ -46,4 +46,4 @@ npm test                 # node:test via tsx
 node dist/cli.js audit  # run the built CLI
 ```
 
-Node.js 20 and 22 are supported and both are covered in CI (`.github/workflows/ci.yml`).
+Node.js 20 and 22 are supported, on both Linux and macOS, and every combination is covered in CI (`.github/workflows/ci.yml`).

@@ -15,4 +15,17 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // Plain Node.js scripts (not part of the published package, not
+    // TypeScript) — `no-undef` needs the Node globals they actually run
+    // with, which the rest of this config doesn't declare because src/
+    // and tests/ get them from @types/node instead.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+      },
+    },
+  },
 );

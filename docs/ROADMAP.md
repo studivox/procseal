@@ -2,16 +2,17 @@
 
 This roadmap records intent, not release promises. Scope may change as the threat model and fixtures improve.
 
-## v0.1 — PM2 drift scanner
+## v0.1.0 — PM2 drift scanner (released 2026-08-19)
 
 - [x] Document the threat model and redaction contract
 - [x] Parse `.env` files without mutating the process environment
 - [x] Read PM2 process metadata through a replaceable adapter
 - [x] Compare declared configuration with live process state
-- [x] Emit stable findings with severity (PS001, PS002, PS003, PS005 — see below)
+- [x] Emit stable findings with severity (PS001–PS005 — see below)
 - [x] Add terminal and JSON reporters
-- [ ] Test Linux and macOS behavior with synthetic fixtures
-- [ ] Publish a signed npm provenance build
+- [x] Test Linux and macOS behavior in CI (Ubuntu and macOS runners, Node 20 and 22 — see `.github/workflows/ci.yml`)
+- [x] Redesign README.md as a credible product page (Issue #3)
+- [ ] Publish a signed npm provenance build — the release workflow (`.github/workflows/release.yml`) and trusted-publishing configuration are ready (see [RELEASE.md](RELEASE.md)), but the first actual `npm publish` is a deliberate, separate manual step, not part of landing this workflow file
 
 The CLI foundation (executable `procseal` command, shared types, HMAC
 fingerprinting, redaction, dotenv parsing, reporters) landed first as its
