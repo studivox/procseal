@@ -36,11 +36,21 @@ export interface DotenvSnapshot {
  * documented on the PM2 adapter's hard limits — a truncated secret
  * compared as if it were the whole value could produce a false equality
  * result.
+ *
+ * `'env_file_changed_during_read'` covers a file that was modified — in
+ * place, on the same inode — between the adapter opening it and finishing
+ * reading it (an append, a truncate, or an in-place rewrite that leaves
+ * the size unchanged). See "Sensitive-value handling" /
+ * `readDotenvFile` in `src/adapters/dotenv-file.ts` for the pre/post
+ * `fstat` comparison that detects this; it is deliberately not described
+ * as preventing the race, only detecting it and refusing to trust
+ * whatever was read.
  */
 export type DotenvFileErrorCode =
   | 'env_file_not_found'
   | 'env_file_not_regular'
   | 'env_file_too_large'
+  | 'env_file_changed_during_read'
   | 'env_file_unreadable'
   | 'env_file_malformed'
   | 'env_file_duplicate_key'

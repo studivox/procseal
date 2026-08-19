@@ -354,22 +354,40 @@ issues, all fixed here before merge:
   `--env`:
   - Opens with `O_NOFOLLOW` and reads via the resulting file descriptor
     only (never a second path-based lookup) — a symlink at the given path
-    is rejected race-free at `open()` time (`ELOOP`), and every subsequent
+    is rejected race-free at `open()` time (`ELOOP`); every subsequent
     operation targets the exact inode that was opened, immune to the path
-    being replaced afterward.
-  - Rejects non-regular files; enforces a 1 MiB file-size limit checked
-    both against `fstat`'s reported size before reading and against the
-    actual bytes read afterward.
+    being replaced afterward. This is descriptor-bound reading, not a
+    guarantee the content itself is unchanged while being read — see the
+    mutation-detection bullet below.
+  - Rejects non-regular files. Reads through a bounded loop (`readBounded`)
+    that allocates a single `maxFileBytes + 1`-byte buffer once and fills
+    it in fixed-size chunks via `readSync`; more than `maxFileBytes + 1`
+    bytes can never be buffered, however large the file is or grows to be
+    while the loop runs, and the read fails with the existing oversized-file
+    error the moment that bound would be exceeded. A pre-read `fstat` size
+    check remains as a fast rejection path.
+  - A pre/post `fstatSync(fd, { bigint: true })` comparison (`dev`, `ino`,
+    `size`, `mtimeNs`, `ctimeNs`) around the read loop detects any
+    same-inode mutation — append, truncate, or an in-place rewrite,
+    including a same-size rewrite that only nanosecond-resolution
+    `mtimeNs`/`ctimeNs` catch — and fails closed with a new stable error
+    code, `env_file_changed_during_read`, discarding whatever was read
+    without parsing it.
   - Hard limits on variable count (500), key length (120 characters), and
     value size (8 KiB, measured with `Buffer.byteLength(value, 'utf8')`,
     not JavaScript's `.length`). Malformed content and duplicate keys both
     fail the whole read. Every limit fails fast; none truncates and
     continues.
-  - Registers every declared value in the run's `SecretRegistry`
-    immediately after parsing, before diagnostics, duplicates, or limits
-    are checked. Only values are registered, never keys — dotenv keys are
-    already restricted to `[A-Za-z_][A-Za-z0-9_]*` by the parser's own key
-    pattern, so they cannot be secrets by construction.
+  - Registers every **successfully parsed** value in the run's
+    `SecretRegistry` immediately after parsing, before diagnostics,
+    duplicates, or limits are checked — including an earlier value a later
+    duplicate key overwrites, via a new `ParsedDotenv.assignments` field
+    (`src/parsers/dotenv.ts`) that records every successful parse in file
+    order, distinct from the deduped `values` map. A malformed fragment
+    that never successfully parsed is never registered and never appears
+    in its diagnostic. Only values are registered, never keys — dotenv
+    keys are already restricted to `[A-Za-z_][A-Za-z0-9_]*` by the
+    parser's own key pattern, so they cannot be secrets by construction.
   - Wraps every declared value in the same opaque `ObservedValue` the PM2
     adapter uses, sharing one `Fingerprinter` per audit run (created once
     in `runAuditPipeline`) so declared and live values always compare
@@ -426,6 +444,53 @@ issues, all fixed here before merge:
   at any depth is still registered exactly as before. Regression tests
   (`tests/integration/pm2-adapter.test.ts`) cover both the multi-location
   duplication and the per-record scoping boundary.
+
+An independent review of this milestone's branch found three further
+merge-blocking gaps in the dotenv-file adapter, all fixed here:
+
+- **Unbounded read on a growing file.** `readFileSync(fd)` read the
+  complete file into memory before the post-read size check ran, so a
+  file that grew after the initial `fstat` could exceed the documented
+  1 MiB memory bound. Replaced with `readBounded()`: a single
+  `maxFileBytes + 1`-byte buffer allocated once, filled by a chunked
+  `readSync` loop that terminates and fails with the existing
+  oversized-file error the instant that bound would be exceeded — never
+  truncating and continuing, never reading further. Short reads and
+  `EINTR`/`EAGAIN` are retried safely without losing or duplicating bytes.
+- **In-place mutation of the open file went undetected.** The existing
+  symlink/path-replacement protections only proved the read was bound to
+  one descriptor; they said nothing about another process truncating,
+  rewriting, or appending to that same, already-open inode during the
+  read. Added an `fstatSync(fd, { bigint: true })` snapshot (`dev`, `ino`,
+  `size`, `mtimeNs`, `ctimeNs`) taken immediately before and after the
+  bounded read; any difference now fails closed with a new
+  `env_file_changed_during_read` error code, discarding the read content
+  before it is ever parsed. Documented accurately as descriptor-bound
+  reading with pre/post mutation detection — not as full race-freedom,
+  which only the symlink-rejection-at-`open()` property actually has.
+- **A duplicate key's earlier value was silently unregistered.** The
+  parser's `values` map keeps only the last-written value per key, and
+  the adapter registered secrets from that map — so an earlier duplicate
+  raw value never reached `SecretRegistry`, even though the file
+  genuinely contained it and the adapter's documentation claimed every
+  declared value was registered. Added `ParsedDotenv.assignments`
+  (`src/parsers/dotenv.ts`), an order-preserving record of every
+  successfully parsed occurrence including ones a later duplicate key
+  overwrites; the adapter now registers every occurrence in
+  `assignments`, before diagnostics or limits are checked. A malformed
+  fragment that never successfully parsed still never appears in
+  `assignments` and never appears in its diagnostic.
+
+Regression tests added through an injected, deterministic
+instrumentation seam (`onChunkReadForTesting`/`readChunkBytesForTesting`
+in `ReadDotenvFileOptions`) — no timing-dependent or background-race
+tests: a file that keeps growing during the read cannot cause more than
+`maxFileBytes + 1` bytes to be buffered; append, truncate, and a
+same-size in-place rewrite (caught via `mtimeNs`/`ctimeNs`, not size
+alone) all fail closed with `env_file_changed_during_read`; an untouched
+read does not false-positive; and a duplicate-key file with two unique
+sentinel values proves neither the overwritten nor the final value
+reaches terminal, JSON, or error output.
 
 ### Notes
 

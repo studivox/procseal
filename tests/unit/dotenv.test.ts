@@ -167,3 +167,38 @@ test('a diagnostic never carries the raw attempted value', () => {
     assert.equal(serialized.includes('unterminated-sentinel-value-should-not-appear'), false);
   }
 });
+
+test('assignments records every successfully-parsed occurrence, in file order, even ones a duplicate key later overwrites', () => {
+  const parsed = parseDotenv('DUP=first-value\nOTHER=middle\nDUP=second-value\n');
+
+  assert.deepEqual(
+    parsed.assignments.map((a) => ({ key: a.key, value: a.value })),
+    [
+      { key: 'DUP', value: 'first-value' },
+      { key: 'OTHER', value: 'middle' },
+      { key: 'DUP', value: 'second-value' },
+    ],
+  );
+  // `values` only keeps the last occurrence — the overwritten "first-value"
+  // is not reachable through it, only through `assignments`.
+  assert.equal(parsed.values.get('DUP'), 'second-value');
+  assert.deepEqual(parsed.duplicateKeys, ['DUP']);
+});
+
+test('assignments records each line number alongside its key and value', () => {
+  const parsed = parseDotenv('A=1\nB=2\n\nC=3\n');
+  assert.deepEqual(
+    parsed.assignments.map((a) => a.line),
+    [1, 2, 4],
+  );
+});
+
+test('a line that fails to parse never appears in assignments, only as a diagnostic', () => {
+  const parsed = parseDotenv('GOOD=value\nBROKEN="unterminated\n');
+  assert.deepEqual(
+    parsed.assignments.map((a) => a.key),
+    ['GOOD'],
+  );
+  assert.equal(parsed.diagnostics.length, 1);
+  assert.equal(parsed.diagnostics[0]?.key, 'BROKEN');
+});

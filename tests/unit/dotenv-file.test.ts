@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   mkdirSync,
@@ -9,6 +10,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -257,4 +259,172 @@ test('race-safety mechanism: reading via an already-open file descriptor is immu
   } finally {
     closeSync(fd);
   }
+});
+
+test('adversarial: every duplicate value is registered — including the earlier, overwritten one — and neither reaches output', () => {
+  const registry = createSecretRegistry();
+  // Two distinct sentinels for the same key: parsed.values only keeps the
+  // second (last-write-wins), but both must still be registered.
+  const path = writeEnvFile(`DUP=${SENTINEL_JWT_SECRET}\nDUP=${SENTINEL_DB_PASSWORD}\n`);
+
+  const result = readDotenvFile({ path, registry });
+  assertErr(result);
+  assert.equal(result.error.code, 'env_file_duplicate_key');
+
+  assert.equal(
+    registry.scrub(`first=${SENTINEL_JWT_SECRET}`).includes(SENTINEL_JWT_SECRET),
+    false,
+    'the earlier, overwritten duplicate value must still be registered',
+  );
+  assert.equal(
+    registry.scrub(`final=${SENTINEL_DB_PASSWORD}`).includes(SENTINEL_DB_PASSWORD),
+    false,
+    'the final duplicate value must be registered',
+  );
+
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(SENTINEL_JWT_SECRET), false);
+  assert.equal(serialized.includes(SENTINEL_DB_PASSWORD), false);
+});
+
+test('a malformed line never leaks its content: the diagnostic detail carries no raw text, and the unparsed fragment is never registered', () => {
+  const registry = createSecretRegistry();
+  const path = writeEnvFile(`BROKEN="unterminated ${SENTINEL_API_KEY}\n`);
+
+  const result = readDotenvFile({ path, registry });
+  assertErr(result);
+  assert.equal(result.error.code, 'env_file_malformed');
+  assert.equal(
+    result.error.detail !== undefined && result.error.detail.includes(SENTINEL_API_KEY),
+    false,
+  );
+  assert.equal(JSON.stringify(result).includes(SENTINEL_API_KEY), false);
+  // Never successfully parsed, so — unlike a duplicate value — it was
+  // never registered either. This is the documented boundary: only
+  // *successfully parsed* assignments are ever registered.
+  assert.equal(
+    registry.scrub(`x=${SENTINEL_API_KEY}`).includes(SENTINEL_API_KEY),
+    true,
+    'a fragment that never successfully parsed must not be registered',
+  );
+});
+
+test('bounded read: a file that keeps growing during the read cannot cause more than maxFileBytes + 1 bytes to be buffered, and fails with env_file_too_large', () => {
+  const registry = createSecretRegistry();
+  const dir = makeTempDir();
+  const path = join(dir, 'growing.env');
+  writeFileSync(path, 'A=1\n', 'utf8');
+
+  let hookCalls = 0;
+  const result = readDotenvFile({
+    path,
+    registry,
+    limits: { maxFileBytes: 200 },
+    readChunkBytesForTesting: 20,
+    onChunkReadForTesting: () => {
+      hookCalls += 1;
+      // Keeps the file growing faster than it can ever be fully consumed
+      // — if the read loop weren't structurally bounded by its fixed
+      // buffer allocation, this would never terminate.
+      appendFileSync(path, `B${'x'.repeat(49)}\n`, 'utf8');
+    },
+  });
+
+  assertErr(result);
+  assert.equal(result.error.code, 'env_file_too_large');
+  // Bounded by roughly (maxFileBytes / chunkBytes): proves the loop
+  // stopped rather than reading indefinitely as the file kept growing.
+  assert.ok(
+    hookCalls > 0 && hookCalls < 50,
+    `expected a small, bounded chunk count, got ${hookCalls}`,
+  );
+});
+
+test('mutation detection: appending to the file mid-read fails closed with env_file_changed_during_read', () => {
+  const registry = createSecretRegistry();
+  const dir = makeTempDir();
+  const path = join(dir, 'append.env');
+  writeFileSync(path, `KEY=${SENTINEL_JWT_SECRET}\n`, 'utf8');
+
+  let mutated = false;
+  const result = readDotenvFile({
+    path,
+    registry,
+    onChunkReadForTesting: () => {
+      if (!mutated) {
+        mutated = true;
+        appendFileSync(path, 'EXTRA=appended-after-open\n', 'utf8');
+      }
+    },
+  });
+
+  assertErr(result);
+  assert.equal(result.error.code, 'env_file_changed_during_read');
+  assert.equal(mutated, true);
+});
+
+test('mutation detection: truncating the file mid-read fails closed with env_file_changed_during_read', () => {
+  const registry = createSecretRegistry();
+  const dir = makeTempDir();
+  const path = join(dir, 'truncate.env');
+  writeFileSync(path, `KEY=${SENTINEL_JWT_SECRET}\nOTHER=some-other-value\n`, 'utf8');
+
+  let mutated = false;
+  const result = readDotenvFile({
+    path,
+    registry,
+    onChunkReadForTesting: () => {
+      if (!mutated) {
+        mutated = true;
+        truncateSync(path, 4);
+      }
+    },
+  });
+
+  assertErr(result);
+  assert.equal(result.error.code, 'env_file_changed_during_read');
+  assert.equal(mutated, true);
+});
+
+test('mutation detection: an in-place, same-size content rewrite mid-read is caught via mtime/ctime, not size alone', () => {
+  const registry = createSecretRegistry();
+  const dir = makeTempDir();
+  const path = join(dir, 'rewrite.env');
+  const original = `KEY=${SENTINEL_JWT_SECRET}\n`;
+  writeFileSync(path, original, 'utf8');
+  const replacement = `${'X'.repeat(original.length - 1)}\n`;
+  assert.equal(Buffer.byteLength(replacement, 'utf8'), Buffer.byteLength(original, 'utf8'));
+
+  let mutated = false;
+  const result = readDotenvFile({
+    path,
+    registry,
+    onChunkReadForTesting: () => {
+      if (!mutated) {
+        mutated = true;
+        writeFileSync(path, replacement, 'utf8');
+      }
+    },
+  });
+
+  assertErr(result);
+  assert.equal(result.error.code, 'env_file_changed_during_read');
+  assert.equal(mutated, true);
+});
+
+test('mutation detection does not false-positive when the file is left untouched during the read', () => {
+  const registry = createSecretRegistry();
+  const path = writeEnvFile(`KEY=${SENTINEL_JWT_SECRET}\n`);
+
+  let hookCalls = 0;
+  const result = readDotenvFile({
+    path,
+    registry,
+    onChunkReadForTesting: () => {
+      hookCalls += 1;
+    },
+  });
+
+  assertOk(result);
+  assert.ok(hookCalls > 0);
 });

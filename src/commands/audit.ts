@@ -157,6 +157,7 @@ const AUDIT_ERROR_MESSAGES: Readonly<Record<AuditErrorCode, string>> = {
   env_file_not_regular:
     'The requested dotenv file is not a regular file (symlinks are not permitted).',
   env_file_too_large: 'The requested dotenv file exceeds the maximum allowed size.',
+  env_file_changed_during_read: 'The requested dotenv file changed while it was being read.',
   env_file_unreadable: 'The requested dotenv file could not be read.',
   env_file_malformed: 'The requested dotenv file contains malformed content.',
   env_file_duplicate_key: 'The requested dotenv file declares the same variable more than once.',

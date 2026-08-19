@@ -349,18 +349,48 @@ shape of the result the reporters render.
 `src/adapters/dotenv-file.ts` reads exactly the file passed to `--env` —
 never any other path, never an ecosystem file, never auto-discovered.
 
-- Opens with `O_NOFOLLOW` and reads via the resulting file descriptor only
-  (never a second path-based lookup), for the same two race-free
-  properties documented for the PM2 adapter's command execution: a symlink
-  at the given path is rejected by the OS at `open()` time (`ELOOP`), and
-  every subsequent operation (`fstat`, read) targets the exact inode that
-  was opened, immune to the path being replaced afterward.
+- Opens with `O_NOFOLLOW` and, from that point on, only ever operates on
+  the resulting file descriptor — never a second path-based lookup. This
+  gives two distinct properties, and they are not the same guarantee:
+  - A symlink at the given path is rejected by the OS at `open()` time
+    (`ELOOP`), **race-free** — there is no window between "check if it's
+    a symlink" and "open it" for a symlink to be swapped in.
+  - Every subsequent operation (`fstat`, read) targets the exact inode
+    that was opened, so a _rename-based swap at the same path_ (unlinking
+    `path` and putting a different file there) cannot affect an
+    already-open descriptor. This is **descriptor-bound reading, not a
+    guarantee that the file's content is unchanged while being read** —
+    the same inode can still be modified in place (appended to,
+    truncated, or rewritten) by another process for as long as the
+    descriptor is held open. Nothing about `O_NOFOLLOW` prevents that; see
+    the mutation-detection bullet below for what actually catches it.
 - Rejects non-regular files (checked via `fstat().isFile()` after the
   `O_NOFOLLOW` open).
-- A 1 MiB file-size limit, checked twice: once against `fstat`'s reported
-  size before reading, and again against the actual bytes read afterward —
-  the second check is what protects against the file changing size between
-  the two calls, not a redundant formality.
+- Reads through a **bounded loop** (`readBounded`), not `readFileSync`:
+  a single buffer is allocated once, at exactly `maxFileBytes + 1` bytes,
+  and the loop reads into it in fixed-size chunks (64 KiB by default) via
+  `readSync` on the open descriptor. However large the underlying file is
+  — or grows to be while the loop is running — more than
+  `maxFileBytes + 1` bytes can never be buffered; the loop fails with
+  `env_file_too_large` the moment that would happen, rather than
+  continuing to read further. A pre-read `fstat` size check still rejects
+  a file that is already too large before any read is attempted, as a
+  fast path; the bounded loop is what actually enforces the limit,
+  including against a file that grows _during_ the read. Short reads
+  (a `readSync` call returning fewer bytes than requested, without error)
+  and `EINTR`/`EAGAIN` are both handled without losing or re-reading any
+  bytes.
+- **Same-inode mutation detection**: an `fstat(fd, { bigint: true })`
+  snapshot (`dev`, `ino`, `size`, `mtimeNs`, `ctimeNs`) is captured
+  immediately before the bounded read loop starts and again immediately
+  after it finishes. If any of those five fields differ, the read fails
+  closed with `env_file_changed_during_read` — the content that was read
+  is discarded, never parsed, never registered. `mtimeNs`/`ctimeNs` (not
+  the coarser, second-resolution `mtime`/`ctime`) are what catch a
+  same-size in-place rewrite that a size-only comparison would miss
+  entirely. This detects the mutation after the fact; it does not, and
+  cannot, prevent another process from writing to the file while this
+  adapter holds it open — see the note on descriptor-bound reading above.
 - Hard limits on variable count (500), key length (120 characters), and
   value size (8 KiB, measured with `Buffer.byteLength(value, 'utf8')`, not
   JavaScript's `.length` — the same multibyte-Unicode reasoning documented
@@ -369,11 +399,20 @@ never any other path, never an ecosystem file, never auto-discovered.
 - Malformed content (any `parsers/dotenv.ts` diagnostic — an invalid line,
   an unterminated quote, trailing content after a closed quote) and
   duplicate keys both fail the whole read, with their own stable error
-  codes.
-- Every declared value is registered in the run's `SecretRegistry`
-  immediately after parsing — before diagnostics, duplicates, or limits are
-  even checked — the same ordering guarantee the PM2 adapter makes. Only
-  values are registered, never keys: dotenv keys are already restricted to
+  codes. A malformed fragment was never successfully parsed, so it is
+  never registered and its `DotenvDiagnostic` never carries any raw source
+  text — only a line number, a reason, and (when recoverable) the key.
+- Every **successfully parsed** value is registered in the run's
+  `SecretRegistry` immediately after parsing — before diagnostics,
+  duplicates, or limits are even checked — the same ordering guarantee the
+  PM2 adapter makes. This is every occurrence, not only the one
+  `parsed.values` keeps: `parsers/dotenv.ts`'s `ParsedDotenv.assignments`
+  records every successful `key=value` parse in file order, including a
+  value a later duplicate key goes on to overwrite, and the adapter
+  registers every one of them — an earlier, overwritten value is still a
+  raw value that appeared in the file and must not be assumed safe just
+  because a later line replaced it. Only values are registered, never
+  keys: dotenv keys are already restricted to
   `[A-Za-z_][A-Za-z0-9_]*` by the parser's own key pattern, so they cannot
   be secrets by construction, unlike the PM2 adapter's payload, whose shape
   is not known ahead of time.
@@ -383,6 +422,15 @@ never any other path, never an ecosystem file, never auto-discovered.
   `runAuditPipeline`) — so a declared value and a live value are always
   compared through the same run-scoped HMAC key, and `ObservedValue.equals()`
   is the only comparison primitive either side ever goes through.
+- Tests exercise the bounded-read and mutation-detection paths
+  deterministically, through an injected instrumentation seam
+  (`onChunkReadForTesting`/`readChunkBytesForTesting` in
+  `ReadDotenvFileOptions`) that lets a test synchronously mutate the file
+  between chunk reads — no real concurrency, no timing-dependent
+  background process, no flakiness. See
+  `tests/unit/dotenv-file.test.ts` for a growing file that cannot exceed
+  the buffer bound, and append/truncate/same-size-rewrite mutations that
+  all fail closed.
 
 ### Process selection
 
