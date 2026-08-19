@@ -26,7 +26,7 @@ const TOP_LEVEL_HELP = `procseal — local-first configuration and secret drift 
 
 Usage:
   procseal [--help] [--version]
-  procseal audit --process <pm2-process-name> --env <path> [--json] [--check-unexpected]
+  procseal audit --process <pm2-process-name> --env <path> [--json] [--check-unexpected] [--check-reuse]
 
 Status:
   pre-alpha. "procseal audit" performs a real, read-only comparison between

@@ -6,6 +6,7 @@ import { createFingerprinter } from '../../src/core/fingerprint.js';
 import { toSafeLabelOrRedacted } from '../../src/core/label.js';
 import { ObservedValue } from '../../src/core/observed-value.js';
 import type { Pm2AdapterResult } from '../../src/core/pm2-types.js';
+import { isReuseCandidate } from '../../src/core/reuse-candidate-policy.js';
 import {
   SENTINEL_API_KEY,
   SENTINEL_DB_PASSWORD,
@@ -48,6 +49,25 @@ function fakeLive(
   processName: string,
   entries: Readonly<Record<string, string>>,
 ): typeof import('../../src/adapters/pm2.js').inspectPm2 {
+  return fakeLiveFleet([{ name: processName, entries }]);
+}
+
+/**
+ * Like `fakeLive`, but builds every process in `processes` (sharing one
+ * registry/fingerprinter across all of them, exactly like the real
+ * `inspectPm2` adapter would within one run) into a single `Pm2Snapshot`
+ * — needed for `--check-reuse` (PS004) tests, which compare the selected
+ * process against every *other* process in the same snapshot.
+ * `reuseCandidate` is computed with the real `isReuseCandidate` policy
+ * function, not hand-picked, so these tests exercise the same eligibility
+ * decision production would make.
+ */
+function fakeLiveFleet(
+  processes: ReadonlyArray<{
+    readonly name: string;
+    readonly entries: Readonly<Record<string, string>>;
+  }>,
+): typeof import('../../src/adapters/pm2.js').inspectPm2 {
   return (async (options: {
     readonly registry: { register(v: string): void };
     readonly fingerprinter?: unknown;
@@ -55,20 +75,26 @@ function fakeLive(
     const fingerprinter = (options.fingerprinter ?? createFingerprinter()) as ReturnType<
       typeof createFingerprinter
     >;
-    const environmentVariables = Object.entries(entries).map(([name, value]) => ({
-      name: toSafeLabelOrRedacted(name),
-      value: ObservedValue.from(value, fingerprinter, options.registry as never),
-    }));
-    const process = {
-      safeProcessId: toSafeLabelOrRedacted('proc-0'),
-      safeName: toSafeLabelOrRedacted(processName),
-      pm2Id: 0,
-      status: 'online' as const,
-      environmentVariables,
-    };
+    const builtProcesses = processes.map((proc, index) => {
+      const environmentVariables = Object.entries(proc.entries).map(([name, value]) => ({
+        name: toSafeLabelOrRedacted(name),
+        value: ObservedValue.from(value, fingerprinter, options.registry as never),
+        reuseCandidate: isReuseCandidate(name, value),
+      }));
+      return {
+        safeProcessId: toSafeLabelOrRedacted(`proc-${index}`),
+        safeName: toSafeLabelOrRedacted(proc.name),
+        pm2Id: index,
+        status: 'online' as const,
+        environmentVariables,
+      };
+    });
     return {
       ok: true,
-      snapshot: { processes: [process], meta: { processCount: 1, skippedRecordCount: 0 } },
+      snapshot: {
+        processes: builtProcesses,
+        meta: { processCount: builtProcesses.length, skippedRecordCount: 0 },
+      },
     };
   }) as unknown as typeof import('../../src/adapters/pm2.js').inspectPm2;
 }
@@ -81,7 +107,13 @@ function fixedPm2Result(
 
 test('exit 0: audit completes with zero findings when declared and live values match exactly', async () => {
   const { output, exitCode } = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fakeDeclared({ API_KEY: 'same-value', PORT: '3000' }),
@@ -102,7 +134,13 @@ test('exit 0: audit completes with zero findings when declared and live values m
 
 test('exit 3: audit completes with findings when values differ', async () => {
   const { output, exitCode } = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fakeDeclared({ API_KEY: 'declared-value' }),
@@ -127,6 +165,7 @@ test('exit 1: an invalid --process value fails before either adapter is ever cal
       envFilePath: '/unused',
       json: true,
       checkUnexpected: false,
+      checkReuse: false,
     },
     VERSION,
     {
@@ -156,7 +195,13 @@ test('exit 1: a dotenv-file failure fails before PM2 is ever called, and carries
   let pm2Called = false;
 
   const { output, exitCode } = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fixedDotenvResult({ ok: false, error: { code: 'env_file_not_found' } }),
@@ -184,7 +229,13 @@ test('exit 1: a dotenv-file failure fails before PM2 is ever called, and carries
 
 test('exit 1: a PM2 adapter failure is surfaced with its own stable code', async () => {
   const { output, exitCode } = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fixedDotenvResult({
@@ -203,7 +254,13 @@ test('exit 1: a PM2 adapter failure is surfaced with its own stable code', async
 
 test('exit 1: zero matching processes produces process_not_found', async () => {
   const { output, exitCode } = await executeAuditCommand(
-    { processName: 'ghost-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'ghost-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fixedDotenvResult({
@@ -232,7 +289,13 @@ test('exit 1: more than one matching process produces process_ambiguous', async 
   };
 
   const { output, exitCode } = await executeAuditCommand(
-    { processName: 'dup-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'dup-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fixedDotenvResult({
@@ -261,14 +324,26 @@ test('PS003 is absent by default and present only with checkUnexpected: true, th
   };
 
   const withoutFlag = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: true, checkUnexpected: false },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     deps,
   );
   assert.equal(withoutFlag.exitCode, 0);
 
   const withFlag = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: true, checkUnexpected: true },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: true,
+      checkReuse: false,
+    },
     VERSION,
     deps,
   );
@@ -279,7 +354,13 @@ test('PS003 is absent by default and present only with checkUnexpected: true, th
 
 test('terminal output for a completed audit includes status, process, and finding count but no raw values', async () => {
   const { output } = await executeAuditCommand(
-    { processName: 'my-app', envFilePath: '/unused', json: false, checkUnexpected: false },
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: false,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
     VERSION,
     {
       readDotenvFile: fakeDeclared({ SECRET: SENTINEL_JWT_SECRET }),
@@ -306,7 +387,7 @@ test('adversarial: sentinel declared and live values never reach JSON output, te
 
   for (const scenario of scenarios) {
     const { output } = await executeAuditCommand(
-      { processName: 'my-app', envFilePath: '/unused', ...scenario },
+      { processName: 'my-app', envFilePath: '/unused', checkReuse: false, ...scenario },
       VERSION,
       {
         readDotenvFile: fakeDeclared({
@@ -324,6 +405,210 @@ test('adversarial: sentinel declared and live values never reach JSON output, te
     assert.equal(output.includes(SENTINEL_DB_PASSWORD), false);
     assert.equal(output.includes(SENTINEL_API_KEY), false);
   }
+});
+
+test('PS004 is absent without --check-reuse, even when the selected process shares a sensitive value with another process', async () => {
+  const shared = SENTINEL_API_KEY;
+  const deps = {
+    readDotenvFile: fakeDeclared({}),
+    inspectPm2: fakeLiveFleet([
+      { name: 'my-app', entries: { API_KEY: shared } },
+      { name: 'other-app', entries: { CLIENT_SECRET: shared } },
+    ]),
+  };
+
+  const { output, exitCode } = await executeAuditCommand(
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: false,
+    },
+    VERSION,
+    deps,
+  );
+  assert.equal(exitCode, 0);
+  const parsed = JSON.parse(output) as { findings: readonly { ruleId: string }[] };
+  assert.deepEqual(
+    parsed.findings.filter((f) => f.ruleId === 'PS004'),
+    [],
+  );
+  assert.equal(output.includes(shared), false);
+});
+
+test('PS004 fires with --check-reuse when the selected process shares a sensitive value with another process, under a different variable name, and reveals neither value', async () => {
+  const shared = SENTINEL_API_KEY;
+  const deps = {
+    readDotenvFile: fakeDeclared({}),
+    inspectPm2: fakeLiveFleet([
+      { name: 'my-app', entries: { API_KEY: shared } },
+      { name: 'other-app', entries: { CLIENT_SECRET: shared } },
+    ]),
+  };
+
+  const { output, exitCode } = await executeAuditCommand(
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: true,
+    },
+    VERSION,
+    deps,
+  );
+  assert.equal(exitCode, 3);
+  const parsed = JSON.parse(output) as {
+    findings: ReadonlyArray<{ ruleId: string; details?: Readonly<Record<string, string>> }>;
+  };
+  const ps004 = parsed.findings.filter((f) => f.ruleId === 'PS004');
+  assert.equal(ps004.length, 1);
+  assert.deepEqual(ps004[0]!.details, { variable: 'API_KEY', reusedInProcessCount: '1' });
+  assert.equal(output.includes(shared), false);
+});
+
+test('PS004 does not fire when a sensitive value is repeated only within the selected process itself', async () => {
+  const shared = SENTINEL_API_KEY;
+  const deps = {
+    readDotenvFile: fakeDeclared({}),
+    inspectPm2: fakeLiveFleet([
+      { name: 'my-app', entries: { API_KEY: shared, CLIENT_SECRET: shared } },
+      { name: 'other-app', entries: { PORT: '3000' } },
+    ]),
+  };
+
+  const { output, exitCode } = await executeAuditCommand(
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: true,
+    },
+    VERSION,
+    deps,
+  );
+  assert.equal(exitCode, 0);
+  const parsed = JSON.parse(output) as { findings: readonly { ruleId: string }[] };
+  assert.deepEqual(parsed.findings, []);
+  assert.equal(output.includes(shared), false);
+});
+
+test('PS004 does not fire for short, common, or non-sensitive values, even with matching names across processes', async () => {
+  const deps = {
+    readDotenvFile: fakeDeclared({}),
+    inspectPm2: fakeLiveFleet([
+      {
+        name: 'my-app',
+        entries: {
+          NODE_ENV: 'production',
+          PORT: '3000',
+          DEBUG: 'true',
+          HOST_PATH: '/var/www/app',
+          API_KEY: 'short', // sensitive name, but under the minimum length
+        },
+      },
+      {
+        name: 'other-app',
+        entries: {
+          NODE_ENV: 'production',
+          PORT: '3000',
+          DEBUG: 'true',
+          HOST_PATH: '/var/www/app',
+          API_KEY: 'short',
+        },
+      },
+    ]),
+  };
+
+  const { output, exitCode } = await executeAuditCommand(
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: true,
+    },
+    VERSION,
+    deps,
+  );
+  assert.equal(exitCode, 0);
+  const parsed = JSON.parse(output) as { findings: readonly { ruleId: string }[] };
+  assert.deepEqual(parsed.findings, []);
+});
+
+test('PS004 with three applications sharing one value produces exactly one deterministic, deduplicated finding', async () => {
+  const shared = SENTINEL_JWT_SECRET;
+  const deps = {
+    readDotenvFile: fakeDeclared({}),
+    inspectPm2: fakeLiveFleet([
+      { name: 'my-app', entries: { JWT_SECRET: shared } },
+      { name: 'app-b', entries: { AUTH_TOKEN: shared } },
+      { name: 'app-c', entries: { PASSWORD: shared } },
+    ]),
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { output, exitCode } = await executeAuditCommand(
+      {
+        processName: 'my-app',
+        envFilePath: '/unused',
+        json: true,
+        checkUnexpected: false,
+        checkReuse: true,
+      },
+      VERSION,
+      deps,
+    );
+    assert.equal(exitCode, 3);
+    const parsed = JSON.parse(output) as {
+      findings: ReadonlyArray<{ ruleId: string; details?: Readonly<Record<string, string>> }>;
+    };
+    const ps004 = parsed.findings.filter((f) => f.ruleId === 'PS004');
+    assert.equal(ps004.length, 1);
+    assert.deepEqual(ps004[0]!.details, { variable: 'JWT_SECRET', reusedInProcessCount: '2' });
+    assert.equal(output.includes(shared), false);
+  }
+});
+
+test('PS004 reports multiple distinct reused values separately, without revealing either value', async () => {
+  const sharedA = SENTINEL_JWT_SECRET;
+  const sharedB = SENTINEL_DB_PASSWORD;
+  const deps = {
+    readDotenvFile: fakeDeclared({}),
+    inspectPm2: fakeLiveFleet([
+      { name: 'my-app', entries: { JWT_SECRET: sharedA, DB_PASSWORD: sharedB } },
+      { name: 'other-app', entries: { AUTH_TOKEN: sharedA, DB_PASSWORD: sharedB } },
+    ]),
+  };
+
+  const { output, exitCode } = await executeAuditCommand(
+    {
+      processName: 'my-app',
+      envFilePath: '/unused',
+      json: true,
+      checkUnexpected: false,
+      checkReuse: true,
+    },
+    VERSION,
+    deps,
+  );
+  assert.equal(exitCode, 3);
+  const parsed = JSON.parse(output) as {
+    findings: ReadonlyArray<{ ruleId: string; details?: Readonly<Record<string, string>> }>;
+  };
+  const ps004 = parsed.findings.filter((f) => f.ruleId === 'PS004');
+  assert.equal(ps004.length, 2);
+  assert.deepEqual(
+    ps004.map((f) => f.details),
+    [
+      { variable: 'DB_PASSWORD', reusedInProcessCount: '1' },
+      { variable: 'JWT_SECRET', reusedInProcessCount: '1' },
+    ],
+  );
+  assert.equal(output.includes(sharedA), false);
+  assert.equal(output.includes(sharedB), false);
 });
 
 test('parseAuditArgs: --process and --env are both required; a bare "audit" invocation is a usage error', () => {
@@ -346,6 +631,28 @@ test('parseAuditArgs: accepts --process, --env, --json, and --check-unexpected t
     envFilePath: '/some/path.env',
     json: true,
     checkUnexpected: true,
+    checkReuse: false,
+  });
+});
+
+test('parseAuditArgs: --check-reuse is off by default and true only when explicitly passed', () => {
+  const without = parseAuditArgs(['--process', 'my-app', '--env', '/some/path.env']);
+  assert.equal(without.kind === 'options' && without.options.checkReuse, false);
+
+  const withFlag = parseAuditArgs([
+    '--process',
+    'my-app',
+    '--env',
+    '/some/path.env',
+    '--check-reuse',
+  ]);
+  assert.equal(withFlag.kind, 'options');
+  assert.deepEqual(withFlag.kind === 'options' ? withFlag.options : null, {
+    processName: 'my-app',
+    envFilePath: '/some/path.env',
+    json: false,
+    checkUnexpected: false,
+    checkReuse: true,
   });
 });
 

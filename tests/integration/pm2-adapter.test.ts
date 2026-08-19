@@ -54,6 +54,32 @@ test('a valid pm2 jlist payload is normalized into a snapshot with an opaque, co
   assert.equal(JSON.stringify(result).includes(SENTINEL_JWT_SECRET), false);
 });
 
+test('reuseCandidate is computed per environment variable from the real PS004 candidate policy', async () => {
+  const registry = createSecretRegistry();
+  const payload = [
+    pm2JlistEntry({
+      name: 'billing-api',
+      env: {
+        JWT_SECRET: SENTINEL_JWT_SECRET, // sensitive name, long value -> candidate
+        PORT: '3000', // not a sensitive name -> not a candidate
+        API_KEY: 'short', // sensitive name, value too short -> not a candidate
+        NODE_ENV: 'production', // not a sensitive name -> not a candidate
+      },
+    }),
+  ];
+
+  const result = await inspectPm2({ registry, runner: stdoutRunner(payload) });
+  assertOk(result);
+  const vars = result.snapshot.processes[0]!.environmentVariables;
+  const reuseCandidateFor = (name: string): boolean | undefined =>
+    vars.find((v) => v.name === name)?.reuseCandidate;
+
+  assert.equal(reuseCandidateFor('JWT_SECRET'), true);
+  assert.equal(reuseCandidateFor('PORT'), false);
+  assert.equal(reuseCandidateFor('API_KEY'), false);
+  assert.equal(reuseCandidateFor('NODE_ENV'), false);
+});
+
 test('no processes: an empty jlist array normalizes to an empty snapshot', async () => {
   const registry = createSecretRegistry();
   const result = await inspectPm2({ registry, runner: stdoutRunner([]) });

@@ -220,3 +220,118 @@ test(
     }
   },
 );
+
+test(
+  'isolated real PM2 daemon, two apps: --check-reuse reports PS004 for a sensitive value shared under different names, and is silent without the flag',
+  { timeout: 120_000 },
+  async () => {
+    assert.ok(
+      existsSync(PM2_BINARY),
+      `expected the devDependency-pinned pm2 binary at ${PM2_BINARY} — run "npm ci" first`,
+    );
+
+    const tempDir = mkdtempSync(join(tmpdir(), 'procseal-audit-reuse-e2e-'));
+    const pm2Home = join(tempDir, 'pm2home');
+    const realPm2Home = resolveRealPm2Home();
+    const appPath = join(tempDir, 'sentinel-app.js');
+    writeFileSync(appPath, 'setInterval(() => {}, 60_000);\n', 'utf8');
+
+    const SHARED_SECRET = 'procseal-audit-reuse-e2e-shared-secret-6f21c9';
+    const APP_A = 'procseal-reuse-e2e-app-a';
+    const APP_B = 'procseal-reuse-e2e-app-b';
+
+    const pm2QueryEnv: NodeJS.ProcessEnv = { ...process.env, PM2_HOME: pm2Home };
+    const startEnvA: NodeJS.ProcessEnv = {
+      PATH: process.env['PATH'],
+      HOME: process.env['HOME'],
+      PM2_HOME: pm2Home,
+      API_KEY: SHARED_SECRET,
+    };
+    const startEnvB: NodeJS.ProcessEnv = {
+      PATH: process.env['PATH'],
+      HOME: process.env['HOME'],
+      PM2_HOME: pm2Home,
+      CLIENT_SECRET: SHARED_SECRET,
+    };
+    const cliEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      PATH: [PROJECT_BIN_DIR, process.env['PATH'] ?? ''].join(':'),
+      PM2_HOME: pm2Home,
+    };
+
+    try {
+      await run(PM2_BINARY, ['start', appPath, '--name', APP_A], startEnvA);
+      await run(PM2_BINARY, ['start', appPath, '--name', APP_B], startEnvB);
+
+      let bothOnline = false;
+      for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
+        const { stdout } = await run(PM2_BINARY, ['jlist'], pm2QueryEnv);
+        const parsed = JSON.parse(stdout) as ReadonlyArray<{
+          name?: string;
+          pm2_env?: { status?: string };
+        }>;
+        const online = new Set(
+          parsed.filter((p) => p.pm2_env?.status === 'online').map((p) => p.name),
+        );
+        if (online.has(APP_A) && online.has(APP_B)) {
+          bothOnline = true;
+          break;
+        }
+        await sleep(POLL_INTERVAL_MS);
+      }
+      assert.ok(
+        bothOnline,
+        'expected both started processes to appear online within the retry window',
+      );
+
+      const envPath = join(tempDir, 'app-a.env');
+      writeFileSync(envPath, `API_KEY=${SHARED_SECRET}\n`, 'utf8');
+
+      // --- Without --check-reuse: no PS004, output unchanged. ---
+      const withoutFlag = runCli(['audit', '--process', APP_A, '--env', envPath, '--json'], cliEnv);
+      assert.equal(
+        withoutFlag.status,
+        0,
+        `expected exit 0, got ${withoutFlag.status}: ${withoutFlag.stdout}`,
+      );
+      const withoutParsed = JSON.parse(withoutFlag.stdout) as {
+        findings: ReadonlyArray<{ ruleId: string }>;
+      };
+      assert.deepEqual(
+        withoutParsed.findings.filter((f) => f.ruleId === 'PS004'),
+        [],
+      );
+      assert.equal(withoutFlag.stdout.includes(SHARED_SECRET), false);
+
+      // --- With --check-reuse: PS004 fires, naming API_KEY, never the value. ---
+      const withFlag = runCli(
+        ['audit', '--process', APP_A, '--env', envPath, '--json', '--check-reuse'],
+        cliEnv,
+      );
+      assert.equal(
+        withFlag.status,
+        3,
+        `expected exit 3, got ${withFlag.status}: ${withFlag.stdout}`,
+      );
+      const withParsed = JSON.parse(withFlag.stdout) as {
+        findings: ReadonlyArray<{ ruleId: string; details?: Readonly<Record<string, string>> }>;
+      };
+      const ps004 = withParsed.findings.filter((f) => f.ruleId === 'PS004');
+      assert.equal(ps004.length, 1);
+      assert.equal(ps004[0]!.details?.['variable'], 'API_KEY');
+      assert.equal(ps004[0]!.details?.['reusedInProcessCount'], '1');
+      assert.equal(withFlag.stdout.includes(SHARED_SECRET), false);
+
+      // Terminal (non-JSON) output for the same scenario: PS004 present, no raw value.
+      const withFlagTerminal = runCli(
+        ['audit', '--process', APP_A, '--env', envPath, '--check-reuse'],
+        cliEnv,
+      );
+      assert.equal(withFlagTerminal.status, 3);
+      assert.match(withFlagTerminal.stdout, /PS004/);
+      assert.equal(withFlagTerminal.stdout.includes(SHARED_SECRET), false);
+    } finally {
+      await cleanupIsolatedPm2({ pm2Home, tempDir, realPm2Home, pm2Binary: PM2_BINARY });
+    }
+  },
+);

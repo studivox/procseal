@@ -7,9 +7,11 @@ import {
   type Pm2AdapterError,
   type Pm2AdapterErrorCode,
   type Pm2AdapterResult,
+  type Pm2EnvironmentVariable,
   type Pm2ProcessSnapshot,
   type Pm2Status,
 } from '../core/pm2-types.js';
+import { isReuseCandidate } from '../core/reuse-candidate-policy.js';
 import type { SecretRegistry } from '../core/secret-registry.js';
 
 export type {
@@ -250,7 +252,7 @@ function buildStatus(record: Record<string, unknown>): Pm2Status {
 type EnvNormalizationResult =
   | {
       readonly ok: true;
-      readonly value: readonly { readonly name: SafeLabel; readonly value: ObservedValue }[];
+      readonly value: readonly Pm2EnvironmentVariable[];
     }
   | { readonly ok: false; readonly error: Pm2AdapterError };
 
@@ -277,7 +279,7 @@ function normalizeEnvironment(
     };
   }
 
-  const variables: { readonly name: SafeLabel; readonly value: ObservedValue }[] = [];
+  const variables: Pm2EnvironmentVariable[] = [];
 
   for (const [key, rawValue] of entries) {
     if (key.length > limits.maxKeyLength) {
@@ -309,6 +311,10 @@ function normalizeEnvironment(
     variables.push({
       name: safeKey,
       value: ObservedValue.from(valueString, fingerprinter, registry),
+      // Computed here, from the raw key/value, while both are still in
+      // scope — never re-derivable once `valueString` is wrapped in the
+      // opaque `ObservedValue` above. See core/reuse-candidate-policy.ts.
+      reuseCandidate: isReuseCandidate(key, valueString),
     });
   }
 

@@ -14,6 +14,7 @@ export interface AuditCommandOptions {
   readonly envFilePath: string;
   readonly json: boolean;
   readonly checkUnexpected: boolean;
+  readonly checkReuse: boolean;
 }
 
 export interface AuditCommandResult {
@@ -24,13 +25,14 @@ export interface AuditCommandResult {
 /**
  * The full argument surface `procseal audit` accepts. `--process` and
  * `--env` are both required and must each be given a value — there is no
- * auto-discovery of either. `--check-unexpected` opts into PS003, which is
- * otherwise never reported.
+ * auto-discovery of either. `--check-unexpected` opts into PS003, and
+ * `--check-reuse` opts into PS004 — both are otherwise never reported, and
+ * without them output is identical to a run with all opt-in flags omitted.
  */
 export const AUDIT_HELP = `procseal audit — compare one declared dotenv file with one live PM2 process.
 
 Usage:
-  procseal audit --process <pm2-process-name> --env <path> [--json] [--check-unexpected]
+  procseal audit --process <pm2-process-name> --env <path> [--json] [--check-unexpected] [--check-reuse]
   procseal audit --help
 
 Options:
@@ -42,6 +44,9 @@ Options:
                            terminal text.
   --check-unexpected       Also report PS003 (a live variable not
                            declared in the dotenv file). Off by default.
+  --check-reuse            Also report PS004 (a sensitive live value also
+                           found in another PM2 application). Off by
+                           default. See "Candidate policy" below.
   -h, --help               Show this help and exit.
 
 Both --process and --env must be given explicitly; procseal never
@@ -51,13 +56,26 @@ Implemented rules:
   PS001  Declared and live values differ (excluding PORT — see PS005)
   PS002  A declared variable is missing from the live process
   PS003  An unexpected live variable exists (only with --check-unexpected)
+  PS004  A sensitive live value is reused in another PM2 application
+         (only with --check-reuse)
   PS005  Declared and live PORT values differ (replaces PS001 for PORT)
 
 Deferred rules (defined as stable identifiers, not implemented here):
-  PS004  Sensitive value reused across applications
   PS006  A deployment command is a dangerous, broad PM2 operation
   PS007  A configuration file appears to expose a plaintext secret
   PS008  Saved PM2 dump state differs from the live process set
+
+Candidate policy for --check-reuse (PS004):
+  Only environment variables whose name conservatively indicates a
+  credential (password, secret, token, api key, private key, client
+  secret, access key, auth key, or similar explicit terminology) and
+  whose value is at least 12 UTF-8 bytes long are ever compared. This is
+  a false-positive-reduction heuristic, not proof a value is (or isn't) a
+  secret: it can produce false negatives (a real secret under an
+  unrecognized key name, or shorter than the floor) and, more rarely,
+  false positives (an intentionally shared long value under a
+  credential-shaped name). PS004 findings never reveal either value —
+  only the declared variable name and a count of other applications.
 
 Exit codes:
   0  The audit completed with zero findings.
@@ -93,6 +111,7 @@ export function parseAuditArgs(rest: readonly string[]): AuditArgsParseResult {
   let envFilePath: string | undefined;
   let json = false;
   let checkUnexpected = false;
+  let checkReuse = false;
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index]!;
@@ -106,6 +125,10 @@ export function parseAuditArgs(rest: readonly string[]): AuditArgsParseResult {
     }
     if (arg === '--check-unexpected') {
       checkUnexpected = true;
+      continue;
+    }
+    if (arg === '--check-reuse') {
+      checkReuse = true;
       continue;
     }
     if (arg === '--process') {
@@ -138,7 +161,7 @@ export function parseAuditArgs(rest: readonly string[]): AuditArgsParseResult {
 
   return {
     kind: 'options',
-    options: { processName, envFilePath, json, checkUnexpected },
+    options: { processName, envFilePath, json, checkUnexpected, checkReuse },
   };
 }
 
@@ -282,6 +305,8 @@ export async function runAuditPipeline(
     declared: dotenvResult.snapshot,
     live: selection.process,
     checkUnexpected: options.checkUnexpected,
+    checkReuse: options.checkReuse,
+    allProcesses: pm2Result.snapshot.processes,
   });
 
   return {
