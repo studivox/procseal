@@ -47,14 +47,23 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          # Exact pin, not a floating major/minor: npm trusted publishing
+          # requires npm CLI 11.5.1+ and Node 22.14.0+, and an exact pin
+          # on the release toolchain avoids release-time supply-chain
+          # drift (a later Node 22.x patch silently changing the bundled
+          # npm version this workflow ends up running).
+          node-version: 22.14.0
           registry-url: https://registry.npmjs.org
 
       - name: Ensure npm supports OIDC trusted publishing
-        # Trusted publishing (provenance via OIDC, no stored token) needs
-        # a recent npm CLI. The Node 22 setup-node above bundles a modern
-        # npm already; this is a defensive floor, not a workaround.
-        run: npm install -g npm@latest
+        # Exact pin, matching the Node pin above — not `npm@latest`, which
+        # would let the exact npm CLI version drift between releases.
+        run: npm install -g npm@11.5.1
+
+      - name: Print toolchain versions
+        run: |
+          node --version
+          npm --version
 
       - name: Clean install
         run: npm ci

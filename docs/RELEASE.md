@@ -26,7 +26,8 @@ by this repository's CI — it is manual, external configuration.
    been published yet), add a GitHub Actions trusted publisher pointing
    at:
    - Repository: `studivox/procseal`
-   - Workflow file: `.github/workflows/release.yml`
+   - Workflow filename: `release.yml` (npm's trusted-publisher form wants
+     just the filename, not the `.github/workflows/` path)
    - Environment: `npm-publish` (matches the `environment:` key in that
      workflow — see step 3)
 
