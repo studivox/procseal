@@ -8,12 +8,14 @@
 
 <p align="center">
   <a href="https://github.com/studivox/procseal/actions/workflows/ci.yml"><img src="https://github.com/studivox/procseal/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://www.npmjs.com/package/procseal"><img src="https://img.shields.io/npm/v/procseal?logo=npm&color=CB3837" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/procseal"><img src="https://img.shields.io/npm/dw/procseal?logo=npm" alt="npm weekly downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/node-20%20%7C%2022-339933?logo=node.js&logoColor=white" alt="Node.js 20 or 22"></a>
 </p>
 
 <p align="center">
-  <sub>Not yet published to npm — see <a href="#installation">Installation</a>. An npm-version badge is added here once it is.</sub>
+  <sub>Available on <a href="https://www.npmjs.com/package/procseal">npm</a> · Current release: <a href="https://github.com/studivox/procseal/releases/tag/v0.1.0">v0.1.0</a></sub>
 </p>
 
 ProcSeal is a **read-only** CLI that compares one explicitly named PM2 process against one explicitly named `.env` file and reports drift — missing variables, changed values, wrong ports, and credentials reused across applications — **without printing the underlying secret values**, ever.
@@ -52,25 +54,22 @@ ProcSeal exists to make that drift visible in one command, before it becomes an 
 ## 30-second Quick Start
 
 ```bash
-git clone https://github.com/studivox/procseal.git
-cd procseal
-npm ci && npm run build
-
-node dist/cli.js audit --process my-app --env .env.production
+npm install -g procseal
+procseal audit --process my-app --env .env.production
 ```
 
 That's it — `--process` and `--env` are both required, ProcSeal never auto-discovers either one, and the run is entirely local and read-only. See [Installation](#installation) for a global-command setup and [Live demo](#live-demo) for a full worked example with real (synthetic) drift.
 
 ## Installation
 
-**From npm** (once published — see [Roadmap](#roadmap); this is the intended path for end users and is not live yet):
+**From npm** (recommended):
 
 ```bash
 npm install -g procseal
 procseal audit --process my-app --env .env.production
 ```
 
-**Local / development install** (works today, verified against this exact revision):
+**Local / development install** (for contributors):
 
 ```bash
 git clone https://github.com/studivox/procseal.git
@@ -89,7 +88,7 @@ npm pack                                   # produces procseal-<version>.tgz
 npm install /path/to/procseal-<version>.tgz --prefix /path/to/some/project
 ```
 
-Every command in this README was run against a package built and packed this way, not only against the source checkout.
+The release is validated both from a packed tarball and through clean-install smoke tests, not only from the source checkout. Published packages include npm provenance so the source commit and GitHub Actions build can be verified.
 
 ## Live demo
 
@@ -325,4 +324,4 @@ The full scope and release milestones are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
-[MIT](LICENSE) © 2026 Volkan Cevik, [DEDU LTD](https://github.com/studivox)
+[MIT](LICENSE) © 2026 Volkan Cevik, [DEDU LTD](https://github.com/dedu-ltd)
