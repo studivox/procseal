@@ -54,6 +54,56 @@ test('a valid pm2 jlist payload is normalized into a snapshot with an opaque, co
   assert.equal(JSON.stringify(result).includes(SENTINEL_JWT_SECRET), false);
 });
 
+test('reuseCandidate is computed per environment variable from the real PS004 candidate policy', async () => {
+  const registry = createSecretRegistry();
+  const payload = [
+    pm2JlistEntry({
+      name: 'billing-api',
+      env: {
+        JWT_SECRET: SENTINEL_JWT_SECRET, // sensitive name, long value -> candidate
+        PORT: '3000', // not a sensitive name -> not a candidate
+        API_KEY: 'short', // sensitive name, value too short -> not a candidate
+        NODE_ENV: 'production', // not a sensitive name -> not a candidate
+      },
+    }),
+  ];
+
+  const result = await inspectPm2({ registry, runner: stdoutRunner(payload) });
+  assertOk(result);
+  const vars = result.snapshot.processes[0]!.environmentVariables;
+  const reuseCandidateFor = (name: string): boolean | undefined =>
+    vars.find((v) => v.name === name)?.reuseCandidate;
+
+  assert.equal(reuseCandidateFor('JWT_SECRET'), true);
+  assert.equal(reuseCandidateFor('PORT'), false);
+  assert.equal(reuseCandidateFor('API_KEY'), false);
+  assert.equal(reuseCandidateFor('NODE_ENV'), false);
+});
+
+test('a key name that fails ENV_KEY_PATTERN is never a PS004 candidate, even when it reads as sensitive and is long enough', async () => {
+  const registry = createSecretRegistry();
+  const payload = [
+    pm2JlistEntry({
+      name: 'billing-api',
+      env: {
+        // A dash is not permitted by ENV_KEY_PATTERN
+        // (`/^[A-Za-z_][A-Za-z0-9_]*$/`), even though this key reads as
+        // sensitive and the value is well past the length floor.
+        'API-SECRET': SENTINEL_JWT_SECRET,
+      },
+    }),
+  ];
+
+  const result = await inspectPm2({ registry, runner: stdoutRunner(payload) });
+  assertOk(result);
+  const vars = result.snapshot.processes[0]!.environmentVariables;
+  assert.equal(vars.length, 1);
+  // An invalid key name is retained as the redaction placeholder, not
+  // dropped — mirroring how a hostile/invalid process name is handled.
+  assert.equal(vars[0]!.name, '[REDACTED]');
+  assert.equal(vars[0]!.reuseCandidate, false);
+});
+
 test('no processes: an empty jlist array normalizes to an empty snapshot', async () => {
   const registry = createSecretRegistry();
   const result = await inspectPm2({ registry, runner: stdoutRunner([]) });

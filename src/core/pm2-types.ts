@@ -24,6 +24,25 @@ export interface Pm2EnvironmentVariable {
   readonly name: SafeLabel;
   /** The variable's value, opaque — see core/observed-value.ts. */
   readonly value: ObservedValue;
+  /**
+   * Derived, non-sensitive PS004 eligibility flag — never a raw length or
+   * the value itself. Computed once, at the adapter boundary, from the raw
+   * key and value (`isReuseCandidate` in
+   * `core/reuse-candidate-policy.ts`) before the value is wrapped in an
+   * opaque `ObservedValue`; nothing downstream of the adapter ever sees
+   * the raw value again. A conservative false-positive-reduction
+   * heuristic, not proof a value is (or isn't) a secret — see
+   * `core/reuse-candidate-policy.ts` for the exact policy and its
+   * documented limitations.
+   *
+   * Also `false` whenever `name` above is the redaction placeholder (the
+   * raw key failed `ENV_KEY_PATTERN` validation in
+   * `src/adapters/pm2.ts`) — an invalid key name has no safe, unambiguous
+   * label a PS004 finding could report, so such a variable is never a
+   * candidate on either side of a comparison, regardless of what the
+   * policy would otherwise decide about its value.
+   */
+  readonly reuseCandidate: boolean;
 }
 
 /**

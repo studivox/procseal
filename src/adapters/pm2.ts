@@ -7,9 +7,11 @@ import {
   type Pm2AdapterError,
   type Pm2AdapterErrorCode,
   type Pm2AdapterResult,
+  type Pm2EnvironmentVariable,
   type Pm2ProcessSnapshot,
   type Pm2Status,
 } from '../core/pm2-types.js';
+import { isReuseCandidate } from '../core/reuse-candidate-policy.js';
 import type { SecretRegistry } from '../core/secret-registry.js';
 
 export type {
@@ -82,9 +84,11 @@ export const PM2_LIMITS: Pm2Limits = {
  * match this is not a hard-limit failure (see `PM2_LIMITS.maxKeyLength` for
  * the actual hard limit) — it's handled the same way an unsafe process name
  * is: retained as a redacted `SafeLabel`, not dropped and not fatal to the
- * run.
+ * run, and also never a PS004 `reuseCandidate` (see `normalizeEnvironment`
+ * below). Exported so tests can build fixtures that exercise this exact
+ * gate rather than duplicating the pattern.
  */
-const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface Pm2AdapterOptions {
   /** The run's single `SecretRegistry`. Every raw string leaf of the PM2 payload is registered into it before anything else happens. */
@@ -250,7 +254,7 @@ function buildStatus(record: Record<string, unknown>): Pm2Status {
 type EnvNormalizationResult =
   | {
       readonly ok: true;
-      readonly value: readonly { readonly name: SafeLabel; readonly value: ObservedValue }[];
+      readonly value: readonly Pm2EnvironmentVariable[];
     }
   | { readonly ok: false; readonly error: Pm2AdapterError };
 
@@ -277,7 +281,7 @@ function normalizeEnvironment(
     };
   }
 
-  const variables: { readonly name: SafeLabel; readonly value: ObservedValue }[] = [];
+  const variables: Pm2EnvironmentVariable[] = [];
 
   for (const [key, rawValue] of entries) {
     if (key.length > limits.maxKeyLength) {
@@ -303,12 +307,19 @@ function normalizeEnvironment(
       };
     }
 
-    const safeKey = ENV_KEY_PATTERN.test(key)
-      ? toSafeLabelOrRedacted(key)
-      : toSafeLabelOrRedacted('');
+    const isValidKeyName = ENV_KEY_PATTERN.test(key);
+    const safeKey = isValidKeyName ? toSafeLabelOrRedacted(key) : toSafeLabelOrRedacted('');
     variables.push({
       name: safeKey,
       value: ObservedValue.from(valueString, fingerprinter, registry),
+      // Computed here, from the raw key/value, while both are still in
+      // scope — never re-derivable once `valueString` is wrapped in the
+      // opaque `ObservedValue` above. See core/reuse-candidate-policy.ts.
+      // Gated on `isValidKeyName` too: an invalid key name is reported as
+      // the redaction placeholder (`safeKey` above), which is never a
+      // trustworthy, unambiguous variable identity for a PS004 finding to
+      // reference, regardless of what the policy decides about the value.
+      reuseCandidate: isValidKeyName && isReuseCandidate(key, valueString),
     });
   }
 

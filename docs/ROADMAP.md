@@ -21,8 +21,17 @@ test suite (see [docs/THREAT_MODEL.md](THREAT_MODEL.md)). The rule engine
 milestone landed third: `procseal audit --process <name> --env <path>` now
 performs a real, read-only comparison between one explicitly selected PM2
 process and one explicitly selected dotenv file, implementing PS001,
-PS002, PS003 (opt-in via `--check-unexpected`), and PS005. `procseal
-audit` no longer reports `not_implemented` — see
+PS002, PS003 (opt-in via `--check-unexpected`), and PS005. A fourth
+milestone added PS004 (cross-application sensitive-value reuse detection,
+opt-in via `--check-reuse`) on top of the same read-only PM2 adapter — no
+new command, no second PM2 invocation, just a comparison against
+applications already present in the same run's snapshot. An independent
+review of that milestone before merge found that reuse was being counted
+per PM2 _process record_ rather than per _application_, so a clustered
+application's own worker records were miscounted as separate other
+applications; fixed by grouping the snapshot by safe application name
+before comparing — see [docs/THREAT_MODEL.md](THREAT_MODEL.md) for the
+full design. `procseal audit` no longer reports `not_implemented` — see
 [docs/THREAT_MODEL.md](THREAT_MODEL.md) and the project `README.md` for
 the current status and exit-code contract.
 
@@ -33,16 +42,20 @@ Rules:
 | PS001 | Declared and live values differ                                 | Implemented                                |
 | PS002 | Declared variable is missing from the live process              | Implemented                                |
 | PS003 | Unexpected variable exists in the live process                  | Implemented (opt-in, `--check-unexpected`) |
-| PS004 | A sensitive value appears reused across applications            | Deferred                                   |
+| PS004 | A sensitive value appears reused across applications            | Implemented (opt-in, `--check-reuse`)      |
 | PS005 | Declared and live ports differ                                  | Implemented (replaces PS001 for `PORT`)    |
 | PS006 | A deployment script contains a risky broad PM2 command          | Deferred                                   |
 | PS007 | A configuration file appears likely to expose plaintext secrets | Deferred                                   |
 | PS008 | PM2 dump state differs from the live process set                | Deferred                                   |
 
-PS004, PS006, PS007, and PS008 remain fully deferred: the identifiers are
-stable and reserved, but no detection logic exists for them yet, and this
-milestone does not add remediation text or a configurable severity
-threshold either.
+PS006, PS007, and PS008 remain fully deferred: the identifiers are stable
+and reserved, but no detection logic exists for them yet, and this project
+does not add remediation text or a configurable severity threshold
+either. PS004's eligibility policy (which variables are even compared) is
+a conservative, documented heuristic — see
+[docs/THREAT_MODEL.md](THREAT_MODEL.md) and the project `README.md` for
+its exact rules and limitations; it is not a claim of universal secret
+detection.
 
 ## v0.2 — CI and platform integration
 
