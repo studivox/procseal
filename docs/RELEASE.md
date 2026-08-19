@@ -48,6 +48,7 @@ by this repository's CI — it is manual, external configuration.
 
    This lets the release workflow authenticate through a short-lived
    GitHub OIDC token. **No `NPM_TOKEN` is added to this repository.**
+
 4. **(Recommended) Create a GitHub Environment named `npm-publish`** under
    the repository's Settings → Environments, with required reviewers. The
    release workflow already references `environment: npm-publish`; an
