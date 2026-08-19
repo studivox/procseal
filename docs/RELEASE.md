@@ -16,39 +16,50 @@ access, before the first `npm publish` can succeed. None of this is done
 by this repository's CI — it is manual, external configuration.
 
 1. **Confirm the package name is still available**, immediately before
-   publishing: `npm view procseal` should return `404 Not Found`. If it
-   now exists and isn't this project, stop and pick a different name
-   before continuing.
-2. **Create npm trusted publishing configuration for this package.** On
-   [npmjs.com](https://www.npmjs.com), under the `procseal` package's
-   settings (or, for the very first publish, during package creation —
-   npm supports configuring a trusted publisher for a name that hasn't
-   been published yet), add a GitHub Actions trusted publisher pointing
-   at:
-   - Repository: `studivox/procseal`
-   - Workflow filename: `release.yml` (npm's trusted-publisher form wants
-     just the filename, not the `.github/workflows/` path)
-   - Environment: `npm-publish` (matches the `environment:` key in that
-     workflow — see step 3)
+   bootstrapping: `npm view procseal` should return `404 Not Found`. If
+   it now exists and isn't this project, stop and pick a different name.
+2. **Bootstrap the package name once.** npm cannot attach a trusted
+   publisher until the package already exists. From a throwaway empty
+   directory — never from this repository checkout — create and publish a
+   package.json-only `procseal@0.0.0` placeholder under a non-default
+   dist-tag:
+   ```bash
+   tmp_dir="$(mktemp -d)"
+   cd "$tmp_dir"
+   npm init -y
+   npm pkg set name=procseal version=0.0.0 \
+     description="Bootstrap placeholder for ProcSeal trusted publishing" \
+     license=MIT
+   npm publish --access public --tag bootstrap
+   ```
+   This one-time command requires an authenticated npm maintainer account
+   and its interactive 2FA/OTP. Inspect the generated tarball before
+   confirming. Do not create or store an npm token in this repository or
+   in GitHub Actions.
+3. **Create npm trusted publishing configuration for `procseal`.** On
+   [npmjs.com](https://www.npmjs.com), open the package's Settings →
+   Trusted Publisher, choose GitHub Actions, and configure:
+   - Organization or user: `studivox`
+   - Repository: `procseal`
+   - Workflow filename: `release.yml` (filename only, not the
+     `.github/workflows/` path)
+   - Environment: `npm-publish`
+   - Allowed action: `npm publish`
 
-   This is what lets `npm publish --provenance` in CI authenticate via
-   GitHub's OIDC token instead of a stored npm token. **No npm token is
-   ever added to this repository's secrets** — if a `NPM_TOKEN`-shaped
-   secret shows up in this repo later, that is a regression from this
-   design, not a requirement of it.
+   This lets the release workflow authenticate through a short-lived
+   GitHub OIDC token. **No `NPM_TOKEN` is added to this repository.**
 
-3. **(Recommended) Create a GitHub Environment named `npm-publish`** under
+4. **(Recommended) Create a GitHub Environment named `npm-publish`** under
    the repository's Settings → Environments, with required reviewers. The
    release workflow already references `environment: npm-publish`; an
    environment with no protection rules behaves exactly like not
-   specifying one, so this step is optional hardening, not a functional
-   requirement. If skipped, the workflow still runs, just without a
-   manual-approval gate.
-4. **Verify `npm whoami` from the account that will manage the package**
-   has publish access once the first version exists, in case a manual
-   `npm publish` is ever needed as a fallback (see "Rollback and
-   deprecation" below) — trusted publishing covers CI-driven publishes
-   only.
+   specifying one.
+5. **Verify the configuration before tagging.** Confirm the package page
+   shows `0.0.0` only under the `bootstrap` dist-tag, the trusted
+   publisher fields match exactly, and `0.1.0` remains unpublished.
+   After the real `v0.1.0` workflow succeeds, remove the temporary tag
+   with `npm dist-tag rm procseal bootstrap`. The immutable `0.0.0`
+   version remains in history but is never selected by a normal install.
 
 ## Cutting a release
 
